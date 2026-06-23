@@ -12,8 +12,8 @@ This document tracks development progress by stage, following the TBK (Task Brea
 
 | Phase | Status | Progress | Tasks |
 |-------|--------|----------|-------|
-| Phase 1: Environment & Project Setup | 🟡 In Progress | 80% | INFRA-001 ✅, INFRA-002 ✅, INFRA-003 (next) |
-| Phase 2: Core Infrastructure | ⚪ Not Started | 0% | - |
+| Phase 1: Environment & Project Setup | ✅ Complete | 100% | INFRA-001 ✅ - INFRA-006 ✅ |
+| Phase 2: Core Infrastructure | 🟡 In Progress | 0% | CORE-001a (next) |
 | Phase 3: AI Intelligence Pipeline | ⚪ Not Started | 0% | - |
 | Phase 4: Agent & Admin Interfaces | ⚪ Not Started | 0% | - |
 | Phase 5: Deployment & Hardening | ⚪ Not Started | 0% | - |
@@ -143,11 +143,72 @@ This document tracks development progress by stage, following the TBK (Task Brea
 - ⚪ **INFRA-002h: Write Model Unit Tests**
   - **Pending:** Create `tests/unit/test_models.py` once PostgreSQL is available
 
-### Next: INFRA-003: Redis Configuration & Connection Management
+### INFRA-003: Redis Configuration & Connection Management
 
-- ⚪ Create Redis connection manager
-- ⚪ Implement Redis health check
-- ⚪ Test Redis connectivity
+**Status:** ✅ Complete  
+**Started:** 2026-06-24  
+**Completed:** 2026-06-24  
+
+- ✅ `src/desk/utils/redis_client.py` created
+- ✅ `RedisConnectionManager`: async Redis connection pool with health check
+- ✅ `Cache`: generic cache abstraction with get/set/delete/TTL and JSON serialization
+- ✅ Cache key pattern generators per TSD §7:
+  - `customer_key()` — `customer:{channel}:{sha256(identifier)}`
+  - `vault_key()` — `vault:{collection}:{query_hash}`
+  - `context_key()` — `context:{conversation_id}`
+  - `ai_config_key()` — `ai_config:{deployment_id}`
+  - `session_key()` — `session:{session_id}`
+
+### INFRA-004: Event Bus Implementation (Redis Streams)
+
+**Status:** ✅ Complete  
+**Started:** 2026-06-24  
+**Completed:** 2026-06-24  
+
+- ✅ `src/desk/events/bus.py` — Abstract `EventBus` interface
+- ✅ `src/desk/events/redis_streams.py` — Redis Streams implementation
+  - Consumer groups
+  - At-least-once delivery with `acknowledge()`
+  - Dead-letter queue (DLQ) via `dead_letter()`
+- ✅ `src/desk/events/nats.py` — NATS JetStream stub for Kubernetes deployments
+- ✅ Updated `main.py` to initialize event bus on startup and shutdown gracefully
+
+### INFRA-005: Docker Development Environment
+
+**Status:** ✅ Complete  
+**Started:** 2026-06-24  
+**Completed:** 2026-06-24  
+
+- ✅ `docker-compose.dev.yml` with services: PostgreSQL, Redis, MinIO, desk-api
+- ✅ `Dockerfile.api` for building the API service
+- ✅ Health checks and dependency ordering configured
+- ✅ Volume mounts for hot-reload in development
+
+### INFRA-006: Channel Adapter Plugin System Foundation
+
+**Status:** ✅ Complete  
+**Started:** 2026-06-24  
+**Completed:** 2026-06-24  
+
+- ✅ `src/desk/channels/base.py` — Abstract `ChannelAdapter` interface
+  - `connect()`, `disconnect()`, `receive()`, `send()`, `health_check()`, `reconnect()`
+  - `AdapterConfig` and `AdapterHealthStatus` models
+- ✅ `src/desk/channels/manager.py` — `ChannelAdapterManager`
+  - Register/unregister adapters
+  - Start/stop all adapters
+  - Health checks for all adapters
+  - Inbound message polling and event bus publishing
+- ✅ `src/desk/channels/mock.py` — `MockChannelAdapter` for testing
+- ✅ Updated `main.py` to initialize and shutdown channel adapter manager
+- ✅ Added `MockChannelAdapter` as a registered adapter for development
+
+### Next: CORE-001a: Channel Adapter Base & WhatsApp Business API Adapter
+
+- ⚪ Implement `WhatsAppBusinessAdapter` (Meta/BSP webhooks)
+- ⚪ Webhook verification (GET) and message receipt (POST)
+- ⚪ HMAC signature verification
+- ⚪ Message normalization to InboundMessage
+- ⚪ 24-hour conversation window tracking
 
 ---
 
@@ -214,10 +275,26 @@ This document tracks development progress by stage, following the TBK (Task Brea
 - Test `alembic upgrade head` / `alembic downgrade base`
 - Write model unit tests
 
+### 2026-06-24: INFRA-003 through INFRA-006 Complete — Core Infrastructure
+
+**Status:** ✅ All Phase 1 infrastructure tasks complete
+
+**Commits:**
+- `INFRA-003/004/005: Redis, event bus, and Docker development environment`
+- `INFRA-006: Channel Adapter Plugin System Foundation`
+
+**Work Completed:**
+- ✅ Redis connection pool and cache abstraction (INFRA-003)
+- ✅ Redis Streams event bus with consumer groups and DLQ (INFRA-004)
+- ✅ Docker Compose development environment (INFRA-005)
+- ✅ Channel adapter plugin system with abstract interface and manager (INFRA-006)
+- ✅ Mock channel adapter for testing
+- ✅ Application tested: starts successfully, health endpoint returns correct status
+
 **Current State:**
-- Phase 1: 80% complete
-- Project scaffolding and database models done
-- Ready for INFRA-003: Redis Configuration
+- ✅ Phase 1 (Environment & Project Setup) 100% complete
+- 🟡 Phase 2 (Core Infrastructure) starting with CORE-001a
+- Ready to implement WhatsApp Business API Adapter
 
 ---
 
