@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from desk.channels.base import AdapterConfig
 from desk.channels.manager import ChannelAdapterManager
 from desk.channels.mock import MockChannelAdapter
+from desk.channels.whatsapp_business import router as whatsapp_router
 from desk.config import get_settings
 from desk.events.redis_streams import RedisStreamsEventBus
 from desk.utils.redis_client import get_redis_manager
@@ -86,8 +87,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # TODO: Include routers (CORE-001, AGENT-001, etc.)
-    # app.include_router(whatsapp_router)
+    # Include routers (CORE-001, AGENT-001, etc.)
+    app.include_router(whatsapp_router)
     # app.include_router(webchat_router)
     # app.include_router(agent_router)
     # app.include_router(admin_router)
