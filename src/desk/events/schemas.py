@@ -1,12 +1,11 @@
 """
-ODW.ai Desk — Event Bus Module
+ODW.ai Desk — Event Schemas
 
-Provides event bus abstraction and implementations.
+Re-export event schemas from desk.schemas.events.
+TBK places event schemas here; implementation lives in desk.schemas.events
+for shared access.
 """
 
-from desk.events.bus import EventBus
-from desk.events.nats import NATSEventBus
-from desk.events.redis_streams import RedisStreamsEventBus
 from desk.schemas.events import (
     AgentActionEvent,
     AIDecisionEvent,
@@ -17,9 +16,6 @@ from desk.schemas.events import (
 )
 
 __all__ = [
-    "EventBus",
-    "RedisStreamsEventBus",
-    "NATSEventBus",
     "InboundMessageEvent",
     "OutboundMessageEvent",
     "ConversationStateEvent",
