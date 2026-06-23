@@ -1,0 +1,126 @@
+[project]
+name = "odw-desk"
+version = "1.0.0"
+description = "ODW.ai Desk — Self-Hosted, WhatsApp-First AI Customer Support Agent"
+authors = [
+    {name = "Edward Tsang", email = "edward@ondemandworld.com"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # Web framework
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "python-multipart>=0.0.9",
+
+    # Database
+    "sqlalchemy>=2.0.30",
+    "alembic>=1.13.1",
+    "asyncpg>=0.29.0",
+    "psycopg2-binary>=2.9.9",
+
+    # Redis
+    "redis>=5.0.4",
+    "hiredis>=2.3.2",
+
+    # HTTP client
+    "httpx>=0.27.0",
+
+    # Validation & settings
+    "pydantic>=2.7.1",
+    "pydantic-settings>=2.2.1",
+
+    # Logging
+    "structlog>=24.1.0",
+
+    # PII detection
+    "presidio-analyzer>=0.2.5",
+    "presidio-anonymizer>=0.2.5",
+
+    # AI/LLM
+    "langchain>=0.2.1",
+    "langchain-community>=0.2.1",
+    "langchain-openai>=0.1.7",
+    "langchain-anthropic>=0.1.11",
+    "openai>=1.30.1",
+    "anthropic>=0.25.7",
+
+    # Utilities
+    "python-dotenv>=1.0.1",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "cryptography>=42.0.7",
+    "tenacity>=8.3.0",
+    "pyyaml>=6.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.1",
+    "pytest-asyncio>=0.23.7",
+    "pytest-cov>=5.0.0",
+    "httpx>=0.27.0",  # for TestClient
+    "mypy>=1.10.0",
+    "ruff>=0.4.4",
+    "black>=24.4.2",
+    "isort>=5.13.2",
+    "pre-commit>=3.7.1",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+    "B008",  # do not perform function calls in argument defaults
+]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+strict_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = [
+    "presidio.*",
+    "langchain.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
