@@ -13,7 +13,7 @@ This document tracks development progress by stage, following the TBK (Task Brea
 | Phase | Status | Progress | Tasks |
 |-------|--------|----------|-------|
 | Phase 1: Environment & Project Setup | ✅ Complete | 100% | INFRA-001 ✅ - INFRA-006 ✅ |
-| Phase 2: Core Infrastructure | 🟡 In Progress | 0% | CORE-001a (next) |
+| Phase 2: Core Infrastructure | 🟡 In Progress | 35% | CORE-001a ✅, CORE-004 ✅, CORE-005 ✅, CORE-007 (next) |
 | Phase 3: AI Intelligence Pipeline | ⚪ Not Started | 0% | - |
 | Phase 4: Agent & Admin Interfaces | ⚪ Not Started | 0% | - |
 | Phase 5: Deployment & Hardening | ⚪ Not Started | 0% | - |
@@ -202,13 +202,57 @@ This document tracks development progress by stage, following the TBK (Task Brea
 - ✅ Updated `main.py` to initialize and shutdown channel adapter manager
 - ✅ Added `MockChannelAdapter` as a registered adapter for development
 
-### Next: CORE-001a: Channel Adapter Base & WhatsApp Business API Adapter
+### CORE-001a: Channel Adapter Base & WhatsApp Business API Adapter
 
-- ⚪ Implement `WhatsAppBusinessAdapter` (Meta/BSP webhooks)
-- ⚪ Webhook verification (GET) and message receipt (POST)
-- ⚪ HMAC signature verification
-- ⚪ Message normalization to InboundMessage
-- ⚪ 24-hour conversation window tracking
+**Status:** ✅ Complete  
+**Started:** 2026-06-24  
+**Completed:** 2026-06-24  
+
+- ✅ `src/desk/channels/whatsapp_business.py` created
+- ✅ FastAPI router at `GET /api/v1/webhooks/whatsapp` and `POST /api/v1/webhooks/whatsapp`
+- ✅ Webhook verification (returns hub.challenge)
+- ✅ HMAC-SHA256 signature verification
+- ✅ Message normalization from Meta payload to InboundMessage
+- ✅ Handles text, image, audio, video, document message types
+- ✅ **Tested:** Verification endpoint returns `hub.challenge` correctly
+
+### CORE-004: Message Router & Customer Resolver
+
+**Status:** ✅ Complete  
+**Started:** 2026-06-24  
+**Completed:** 2026-06-24  
+
+- ✅ `src/desk/router/customer_resolver.py`
+  - Resolve or create customers by channel identifier
+  - JSONB containment query for existing customer lookup
+- ✅ `src/desk/router/message_router.py`
+  - Route inbound messages to processing pipeline
+  - Resolve customer, get/create conversation, persist message
+  - Publish routing event to event bus (`conversation.routed`)
+
+### CORE-005: Conversation Manager & State Machine
+
+**Status:** ✅ Complete  
+**Started:** 2026-06-24  
+**Completed:** 2026-06-24  
+
+- ✅ `src/desk/conversations/state_machine.py`
+  - `ConversationStatus` enum
+  - Valid state transitions with validation
+- ✅ `src/desk/conversations/manager.py`
+  - `ConversationManager` class
+  - Get or create conversations
+  - Add messages with sender tracking
+  - Update conversation status with state machine validation
+  - Assign agents to conversations
+  - First-response SLA tracking
+
+### Next: CORE-007: Outbound Dispatcher
+
+- ⚪ Implement `OutboundDispatcher`
+- ⚪ Route outbound messages to correct channel adapter
+- ⚪ Handle channel-specific formatting and retry logic
+- ⚪ Test outbound message delivery
 
 ---
 
@@ -291,10 +335,25 @@ This document tracks development progress by stage, following the TBK (Task Brea
 - ✅ Mock channel adapter for testing
 - ✅ Application tested: starts successfully, health endpoint returns correct status
 
+### 2026-06-24: CORE-001a, CORE-004, CORE-005 Complete — Core Message Pipeline Foundations
+
+**Status:** ✅ Core message pipeline foundations complete
+
+**Commits:**
+- `CORE-001a/CORE-004/CORE-005: WhatsApp adapter, message router, conversation manager`
+
+**Work Completed:**
+- ✅ WhatsApp Business API Adapter (webhook verification + inbound message parsing)
+- ✅ Customer Resolver (resolve/create customers by channel identifier)
+- ✅ Message Router (route inbound messages, persist, publish events)
+- ✅ Conversation State Machine (valid state transitions)
+- ✅ Conversation Manager (add messages, update status, assign agents, SLA)
+- ✅ Tested WhatsApp webhook verification endpoint successfully
+
 **Current State:**
 - ✅ Phase 1 (Environment & Project Setup) 100% complete
-- 🟡 Phase 2 (Core Infrastructure) starting with CORE-001a
-- Ready to implement WhatsApp Business API Adapter
+- 🟡 Phase 2 (Core Infrastructure) 35% complete
+- Next: CORE-007 Outbound Dispatcher, then AI Engine pipeline
 
 ---
 
