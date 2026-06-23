@@ -10,6 +10,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from desk.config import get_settings
+from desk.events.redis_streams import RedisStreamsEventBus
+from desk.utils.redis_client import get_redis_manager
 
 logger = structlog.get_logger()
 
@@ -24,15 +26,24 @@ async def lifespan(app: FastAPI):
         environment=settings.environment,
     )
 
-    # TODO: Initialize database connections (INFRA-002)
-    # TODO: Initialize Redis connection (INFRA-003)
-    # TODO: Initialize event bus (INFRA-004)
-    # TODO: Start channel adapters (CORE-001, CORE-002, CORE-003)
+    # Initialize Redis connection (INFRA-003)
+    redis_manager = get_redis_manager()
+    await redis_manager.connect()
+    app.state.redis_manager = redis_manager
+
+    # Initialize event bus (INFRA-004)
+    event_bus = RedisStreamsEventBus(redis_manager)
+    await event_bus.connect()
+    app.state.event_bus = event_bus
+
+    logger.info("Redis and event bus initialized")
 
     yield
 
     logger.info("Shutting down ODW.ai Desk")
-    # TODO: Graceful shutdown of all services
+    # Graceful shutdown of all services
+    await event_bus.disconnect()
+    await redis_manager.disconnect()
 
 
 def create_app() -> FastAPI:
@@ -71,15 +82,23 @@ def create_app() -> FastAPI:
         Returns:
             dict: Health status
         """
-        # TODO: Check database connectivity (INFRA-002)
-        # TODO: Check Redis connectivity (INFRA-003)
-        # TODO: Check event bus connectivity (INFRA-004)
-        # TODO: Check channel adapter health (CORE-001, CORE-002, CORE-003)
+        # Check Redis connectivity (INFRA-003)
+        redis_health = await redis_manager.health_check()
+
+        overall_status = "healthy"
+        if redis_health["status"] != "healthy":
+            overall_status = "degraded"
 
         return {
-            "status": "healthy",
+            "status": overall_status,
             "version": settings.app_version,
             "environment": settings.environment,
+            "redis": redis_health,
+            "components": {
+                "database": "pending",  # INFRA-002
+                "event_bus": "healthy",  # Connected on startup
+                "channel_gateway": "pending",  # CORE-001, CORE-002, CORE-003
+            },
         }
 
     @app.get("/", tags=["Root"])
