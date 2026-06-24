@@ -8,8 +8,9 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from desk.models.base import Base, UUIDPrimaryKeyMixin
@@ -119,10 +120,11 @@ class Message(UUIDPrimaryKeyMixin, Base):
             "sender_type",
             postgresql_where="sender_type = 'ai'",
         ),
-        UniqueConstraint(
+        Index(
+            "idx_messages_channel_message_id",
             "conversation_id",
             "channel_message_id",
-            name="uq_messages_channel_message_id",
+            unique=True,
             postgresql_where="channel_message_id IS NOT NULL",
         ),
         Index(

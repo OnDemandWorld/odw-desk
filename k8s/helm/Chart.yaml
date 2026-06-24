@@ -1,0 +1,17 @@
+apiVersion: v2
+name: odw-desk
+description: ODW.ai Desk - Self-hosted AI Customer Support Agent
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - customer-support
+  - ai
+  - whatsapp
+  - chatbot
+home: https://github.com/OnDemandWorld/odw-desk
+sources:
+  - https://github.com/OnDemandWorld/odw-desk
+maintainers:
+  - name: ODW.ai Team
+    email: support@odw.ai

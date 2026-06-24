@@ -5,7 +5,7 @@ Simple mock adapter for testing the channel adapter framework.
 """
 
 import asyncio
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from desk.channels.base import AdapterConfig, AdapterHealthStatus, ChannelAdapter
 from desk.schemas.channels import InboundMessage, OutboundMessage

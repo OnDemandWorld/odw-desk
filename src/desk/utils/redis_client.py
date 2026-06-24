@@ -5,9 +5,9 @@ Manages Redis connection pool and provides a cached client instance.
 """
 
 import json
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from functools import lru_cache
-from typing import AsyncGenerator
 
 import redis.asyncio as redis
 from redis.asyncio import Redis
@@ -105,7 +105,8 @@ class Cache:
             value = await client.get(self._key(key))
             if value is None:
                 return None
-            return json.loads(value)
+            result: object = json.loads(value)
+            return result
 
     async def set(
         self,

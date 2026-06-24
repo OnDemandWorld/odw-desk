@@ -7,7 +7,8 @@ Configurable response rules and guardrails.
 from uuid import UUID
 
 from sqlalchemy import Boolean, Index, Integer, String, Text
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from desk.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin

@@ -1,0 +1,224 @@
+"""
+ODW.ai Desk — Agent WebSocket (AGENT-002)
+
+Real-time updates for human agents via WebSocket connections.
+Broadcasts conversation events to connected agents.
+"""
+
+import json
+from typing import Any
+from uuid import UUID
+
+import structlog
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from sqlalchemy import select
+
+from desk.models.agent import Agent
+
+logger = structlog.get_logger()
+
+router = APIRouter(tags=["Agent WebSocket"])
+
+
+class ConnectionManager:
+    """
+    Manages WebSocket connections for real-time agent updates.
+
+    Handles connection lifecycle, message broadcasting, and agent session tracking.
+    """
+
+    def __init__(self):
+        self.active_connections: dict[UUID, WebSocket] = {}
+        self.agent_subscriptions: dict[UUID, set[str]] = {}  # agent_id -> set of conversation_ids
+
+    async def connect(self, agent_id: UUID, websocket: WebSocket) -> None:
+        """Accept and register a new WebSocket connection."""
+        await websocket.accept()
+        self.active_connections[agent_id] = websocket
+        self.agent_subscriptions[agent_id] = set()
+        logger.info("Agent WebSocket connected", agent_id=str(agent_id))
+
+    def disconnect(self, agent_id: UUID) -> None:
+        """Remove a WebSocket connection."""
+        if agent_id in self.active_connections:
+            del self.active_connections[agent_id]
+        if agent_id in self.agent_subscriptions:
+            del self.agent_subscriptions[agent_id]
+        logger.info("Agent WebSocket disconnected", agent_id=str(agent_id))
+
+    async def send_to_agent(self, agent_id: UUID, message: dict[str, Any]) -> None:
+        """Send a message to a specific agent."""
+        if agent_id in self.active_connections:
+            try:
+                await self.active_connections[agent_id].send_json(message)
+            except Exception as e:
+                logger.error("Failed to send to agent", agent_id=str(agent_id), error=str(e))
+                self.disconnect(agent_id)
+
+    async def broadcast_to_agents(
+        self,
+        message: dict[str, Any],
+        conversation_id: str | None = None,
+    ) -> None:
+        """
+        Broadcast a message to agents.
+
+        If conversation_id is provided, only send to agents subscribed to that conversation.
+        Otherwise, broadcast to all connected agents.
+        """
+        if conversation_id:
+            # Send to agents subscribed to this conversation
+            target_agents = [
+                agent_id
+                for agent_id, subs in self.agent_subscriptions.items()
+                if conversation_id in subs
+            ]
+        else:
+            # Broadcast to all agents
+            target_agents = list(self.active_connections.keys())
+
+        for agent_id in target_agents:
+            await self.send_to_agent(agent_id, message)
+
+    def subscribe_agent(self, agent_id: UUID, conversation_id: str) -> None:
+        """Subscribe an agent to conversation updates."""
+        if agent_id in self.agent_subscriptions:
+            self.agent_subscriptions[agent_id].add(conversation_id)
+            logger.debug(
+                "Agent subscribed to conversation",
+                agent_id=str(agent_id),
+                conversation_id=conversation_id,
+            )
+
+    def unsubscribe_agent(self, agent_id: UUID, conversation_id: str) -> None:
+        """Unsubscribe an agent from conversation updates."""
+        if agent_id in self.agent_subscriptions:
+            self.agent_subscriptions[agent_id].discard(conversation_id)
+
+
+# Global connection manager
+connection_manager = ConnectionManager()
+
+
+@router.websocket("/ws/agents/{agent_id}")
+async def agent_websocket(websocket: WebSocket, agent_id: UUID):
+    """
+    WebSocket endpoint for real-time agent updates.
+
+    Agents receive real-time notifications for:
+    - New messages in subscribed conversations
+    - Conversation state changes
+    - Escalation events
+    - SLA breaches
+    """
+    # Verify agent exists
+    from desk.db import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        query = select(Agent).where(Agent.id == agent_id)
+        result = await db.execute(query)
+        agent = result.scalar_one_or_none()
+
+        if not agent:
+            await websocket.close(code=4001, reason="Agent not found")
+            return
+
+    # Connect
+    await connection_manager.connect(agent_id, websocket)
+
+    try:
+        while True:
+            # Receive messages from agent (subscription requests, etc.)
+            data = await websocket.receive_text()
+            try:
+                message = json.loads(data)
+                action = message.get("action")
+
+                if action == "subscribe":
+                    conversation_id = message.get("conversation_id")
+                    if conversation_id:
+                        connection_manager.subscribe_agent(agent_id, conversation_id)
+                        await websocket.send_json({
+                            "type": "subscription_confirmed",
+                            "conversation_id": conversation_id,
+                        })
+
+                elif action == "unsubscribe":
+                    conversation_id = message.get("conversation_id")
+                    if conversation_id:
+                        connection_manager.unsubscribe_agent(agent_id, conversation_id)
+                        await websocket.send_json({
+                            "type": "unsubscription_confirmed",
+                            "conversation_id": conversation_id,
+                        })
+
+                elif action == "ping":
+                    await websocket.send_json({"type": "pong"})
+
+            except json.JSONDecodeError:
+                await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+
+    except WebSocketDisconnect:
+        connection_manager.disconnect(agent_id)
+    except Exception as e:
+        logger.error("WebSocket error", agent_id=str(agent_id), error=str(e))
+        connection_manager.disconnect(agent_id)
+
+
+async def broadcast_new_message(
+    conversation_id: str,
+    message_data: dict[str, Any],
+) -> None:
+    """Broadcast a new message event to subscribed agents."""
+    await connection_manager.broadcast_to_agents(
+        {
+            "type": "new_message",
+            "conversation_id": conversation_id,
+            "message": message_data,
+        },
+        conversation_id=conversation_id,
+    )
+
+
+async def broadcast_conversation_update(
+    conversation_id: str,
+    update_data: dict[str, Any],
+) -> None:
+    """Broadcast a conversation update event to subscribed agents."""
+    await connection_manager.broadcast_to_agents(
+        {
+            "type": "conversation_update",
+            "conversation_id": conversation_id,
+            "update": update_data,
+        },
+        conversation_id=conversation_id,
+    )
+
+
+async def broadcast_escalation(
+    conversation_id: str,
+    escalation_data: dict[str, Any],
+) -> None:
+    """Broadcast an escalation event to all agents."""
+    await connection_manager.broadcast_to_agents(
+        {
+            "type": "escalation",
+            "conversation_id": conversation_id,
+            "escalation": escalation_data,
+        },
+    )
+
+
+async def broadcast_sla_breach(
+    conversation_id: str,
+    breach_data: dict[str, Any],
+) -> None:
+    """Broadcast an SLA breach event to relevant agents."""
+    await connection_manager.broadcast_to_agents(
+        {
+            "type": "sla_breach",
+            "conversation_id": conversation_id,
+            "breach": breach_data,
+        },
+        conversation_id=conversation_id,
+    )

@@ -4,10 +4,10 @@ ODW.ai Desk — Conversation State Machine
 Defines valid conversation state transitions.
 """
 
-from enum import Enum
+from enum import StrEnum
 
 
-class ConversationStatus(str, Enum):
+class ConversationStatus(StrEnum):
     """Conversation status values."""
 
     NEW = "new"

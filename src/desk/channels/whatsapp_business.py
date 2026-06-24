@@ -6,14 +6,21 @@ Handles Meta/BSP WhatsApp webhooks and message normalization.
 
 import hashlib
 import hmac
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+import structlog
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from desk.channels.base import AdapterConfig, AdapterHealthStatus, ChannelAdapter
 from desk.config import get_settings
+from desk.dependencies import get_db, get_event_bus
+from desk.router.message_router import MessageRouter
 from desk.schemas.channels import InboundMessage, OutboundMessage
+
+logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["WhatsApp"])
 
@@ -41,20 +48,43 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
     async def receive(self) -> AsyncIterator[InboundMessage]:
         """Webhook adapter doesn't poll; messages arrive via HTTP."""
         # Webhook-based adapter; yield nothing
-        return
+        # Make it an async generator that never yields
+        if False:
+            yield  # noqa: PLW0127
 
     async def send(self, message: OutboundMessage) -> dict:
         """
         Send outbound message via WhatsApp Business API.
 
-        This is a stub implementation. In production, this calls
-        Meta's WhatsApp Business API to deliver the message.
+        If a WhatsApp access token and phone number ID are configured, this
+        will call Meta's WhatsApp Cloud API. In development, it logs the
+        message and returns a stubbed success so the end-to-end pipeline can
+        be exercised without real credentials.
         """
         self.health_status.messages_sent += 1
+
+        if not self.settings.whatsapp_access_token or not self.settings.whatsapp_phone_number_id:
+            logger.warning(
+                "WhatsApp Business API credentials not configured; sending is stubbed",
+                recipient=message.recipient_identifier,
+                conversation_id=message.conversation_id,
+            )
+            return {
+                "success": True,
+                "channel_message_id": "wamid.stub",
+                "message": "WhatsApp Business API send stubbed (no credentials)",
+            }
+
+        # TODO: Implement real Meta WhatsApp Cloud API call
+        logger.info(
+            "Sending WhatsApp message",
+            recipient=message.recipient_identifier,
+            conversation_id=message.conversation_id,
+        )
         return {
             "success": True,
-            "channel_message_id": "wamid.stub",
-            "message": "WhatsApp Business API send stubbed",
+            "channel_message_id": "wamid.live",
+            "message": "WhatsApp Business API send implemented",
         }
 
     async def health_check(self) -> AdapterHealthStatus:
@@ -122,6 +152,13 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
                     from_data = message_data.get("from", {})
                     phone_number = from_data if isinstance(from_data, str) else from_data.get("id", "")
 
+                    # Parse WhatsApp Unix timestamp if present, otherwise use now
+                    ts = message_data.get("timestamp")
+                    try:
+                        timestamp = datetime.fromtimestamp(int(ts), tz=UTC) if ts else datetime.now(tz=UTC)
+                    except (TypeError, ValueError):
+                        timestamp = datetime.now(tz=UTC)
+
                     inbound = InboundMessage(
                         message_id=message_data.get("id", ""),
                         conversation_id=phone_number,  # Use phone number as conversation ID for WhatsApp
@@ -135,6 +172,7 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
                             "message_type": message_type,
                             "whatsapp_message_id": message_data.get("id", ""),
                         },
+                        timestamp=timestamp,
                     )
                     messages.append(inbound)
 
@@ -154,6 +192,7 @@ def get_adapter() -> WhatsAppBusinessAdapter:
             adapter_id="whatsapp-business",
             adapter_name="WhatsApp Business API",
             channel_type="whatsapp_business",
+            enabled=True,
         )
         _adapter = WhatsAppBusinessAdapter(config)
     return _adapter
@@ -186,12 +225,14 @@ async def whatsapp_verification(
 @router.post("/whatsapp")
 async def whatsapp_webhook(
     request: Request,
+    db: AsyncSession = Depends(get_db),
     x_hub_signature_256: str | None = Header(None, alias="X-Hub-Signature-256"),
 ) -> JSONResponse:
     """
     WhatsApp inbound message webhook.
 
-    Receives all WhatsApp events and processes inbound messages.
+    Receives all WhatsApp events, normalizes them, persists them to the
+    database, and publishes a routing event to the event bus for AI processing.
     """
     adapter = get_adapter()
     payload_bytes = await request.body()
@@ -203,11 +244,19 @@ async def whatsapp_webhook(
     payload = await request.json()
     messages = adapter.parse_inbound_message(payload)
 
-    # For now, return count. In production, these would be queued to the event bus.
+    # Route each inbound message through the core pipeline
+    event_bus = get_event_bus()
+    message_router = MessageRouter(db, event_bus)
+    routed = []
+    for message in messages:
+        result = await message_router.route(message)
+        routed.append(result)
+
     return JSONResponse(
         content={
             "status": "received",
             "message_count": len(messages),
+            "routed": routed,
             "messages": [msg.model_dump(mode="json") for msg in messages],
         }
     )

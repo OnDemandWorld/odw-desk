@@ -8,7 +8,7 @@ All configuration is typed and validated at startup.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, PostgresDsn, RedisDsn, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,7 +47,7 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     # Database
-    database_url: PostgresDsn = Field(
+    database_url: str = Field(
         default="postgresql+asyncpg://desk:desk@localhost:5432/desk",
         description="PostgreSQL connection string",
     )
@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     )
 
     # Redis
-    redis_url: RedisDsn = Field(
+    redis_url: str = Field(
         default="redis://localhost:6379/0", description="Redis connection string"
     )
     redis_prefix: str = Field(default="desk:", description="Redis key prefix")

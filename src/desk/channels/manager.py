@@ -6,7 +6,7 @@ Manages lifecycle, health checks, and event distribution for channel adapters.
 
 from typing import TYPE_CHECKING
 
-from desk.channels.base import AdapterConfig, ChannelAdapter
+from desk.channels.base import ChannelAdapter
 from desk.events.redis_streams import RedisStreamsEventBus
 
 if TYPE_CHECKING:

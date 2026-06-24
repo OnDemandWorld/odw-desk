@@ -7,7 +7,8 @@ Stores AI engine configuration for a deployment.
 from uuid import UUID
 
 from sqlalchemy import Boolean, Float, ForeignKey, Index, String, Text
-from sqlalchemy.dialects.postgresql import BYTEA, JSONB, UUID as PG_UUID
+from sqlalchemy.dialects.postgresql import BYTEA, JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from desk.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin

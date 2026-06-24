@@ -31,6 +31,21 @@ class ConversationManager:
     def __init__(self, db: AsyncSession):
         self.db = db
 
+    async def get_conversation_by_id(self, conversation_id: UUID | str) -> Conversation | None:
+        """
+        Get a conversation by its UUID.
+
+        Args:
+            conversation_id: Conversation UUID (string or UUID object)
+
+        Returns:
+            Conversation entity or None if not found
+        """
+        result = await self.db.execute(
+            select(Conversation).where(Conversation.id == conversation_id)
+        )
+        return result.scalar_one_or_none()
+
     async def get_or_create_conversation(
         self,
         customer: Customer,
@@ -138,9 +153,9 @@ class ConversationManager:
 
         if reason:
             # Update metadata with reason
-            metadata = conversation.metadata or {}
+            metadata = conversation.metadata_ or {}
             metadata["last_status_change_reason"] = reason
-            conversation.metadata = metadata
+            conversation.metadata_ = metadata
 
         if new_status == ConversationStatus.RESOLVED:
             await self._mark_resolution(conversation)

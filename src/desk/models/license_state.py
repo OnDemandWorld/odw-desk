@@ -6,7 +6,7 @@ Tracks license validation and feature gates.
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Index, String
+from sqlalchemy import DateTime, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 

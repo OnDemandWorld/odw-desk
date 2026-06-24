@@ -67,7 +67,19 @@ class OutboundDispatcher:
 
     def _find_adapter(self, channel: str) -> ChannelAdapter | None:
         """Find a registered adapter for the given channel."""
-        for adapter in self.channel_manager.list_adapters():
+        adapters = self.channel_manager.list_adapters()
+
+        # 1. Exact match on adapter channel type
+        for adapter in adapters:
             if adapter.config.channel_type == channel:
                 return adapter
+
+        # 2. Canonical channel mapping: allow adapters whose channel_type
+        #    starts with the canonical channel (e.g. "whatsapp_business" -> "whatsapp").
+        #    This supports multiple adapters (Business API, Baileys) for the
+        #    same customer-facing channel.
+        for adapter in adapters:
+            if adapter.config.channel_type.startswith(channel):
+                return adapter
+
         return None

@@ -7,7 +7,7 @@ Represents a human support agent.
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import Boolean, ForeignKey, Index, Integer, String
+from sqlalchemy import Boolean, Index, Integer, String
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 

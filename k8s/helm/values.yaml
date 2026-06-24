@@ -1,0 +1,96 @@
+# Default values for odw-desk
+replicaCount: 2
+
+image:
+  repository: odwai/desk
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podSecurityContext: {}
+securityContext: {}
+
+service:
+  type: ClusterIP
+  port: 8000
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: desk.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# PostgreSQL configuration
+postgresql:
+  enabled: true
+  auth:
+    username: desk
+    password: desk
+    database: desk
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+
+# Redis configuration
+redis:
+  enabled: true
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: true
+      size: 2Gi
+
+# Application configuration
+config:
+  environment: production
+  debug: false
+  logLevel: INFO
+  databaseUrl: postgresql+asyncpg://desk:desk@postgresql:5432/desk
+  redisUrl: redis://redis-master:6379/0
+  secretKey: change-me-in-production
+  whatsappAccessToken: ""
+  whatsappPhoneNumberId: ""
+  whatsappWebhookVerifyToken: ""
+  vaultUrl: http://vault:8100
+  vaultApiKey: ""
+  ollamaEndpoint: http://ollama:11434
+  localModelName: llama-3.1-8b
+  localModelEnabled: true
+  frontierEnabled: false
+  frontierProvider: none
+  frontierApiKey: ""
+  frontierModelName: gpt-4o-mini

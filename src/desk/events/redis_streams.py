@@ -86,8 +86,18 @@ class RedisStreamsEventBus(EventBus):
             )
 
             events: list[dict[str, Any]] = []
-            for stream_name, entries in messages:
-                for message_id, fields in entries:
+            for stream_msg in messages:
+                if not isinstance(stream_msg, (list, tuple)) or len(stream_msg) != 2:
+                    continue
+                _stream_name, entries = stream_msg
+                if not isinstance(entries, (list, tuple)):
+                    continue
+                for entry in entries:
+                    if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                        continue
+                    message_id, fields = entry
+                    if not isinstance(fields, dict):
+                        continue
                     payload_str = fields.get("payload", "{}")
                     try:
                         payload = json.loads(payload_str)

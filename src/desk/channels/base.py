@@ -5,8 +5,9 @@ Abstract base class and types for all channel adapters.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Any, AsyncIterator, Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -54,7 +55,14 @@ class ChannelAdapter(ABC):
 
     def __init__(self, config: AdapterConfig):
         self.config = config
-        self.health_status = AdapterHealthStatus(status="unhealthy", connected=False)
+        self.health_status = AdapterHealthStatus(
+            status="unhealthy",
+            connected=False,
+            last_connected_at=None,
+            last_error=None,
+            messages_sent=0,
+            messages_received=0,
+        )
 
     @abstractmethod
     async def connect(self) -> None:
@@ -67,7 +75,7 @@ class ChannelAdapter(ABC):
         pass
 
     @abstractmethod
-    async def receive(self) -> AsyncIterator[InboundMessage]:
+    def receive(self) -> AsyncIterator[InboundMessage]:
         """
         Yield normalized inbound messages from the channel.
 

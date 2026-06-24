@@ -7,8 +7,9 @@ Tamper-evident audit log for compliance.
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, Index, String, Text
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
+from sqlalchemy import DateTime, Index, String
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from desk.models.base import Base, UUIDPrimaryKeyMixin

@@ -6,7 +6,6 @@ AES-256-GCM encryption for PII fields and API keys.
 
 import base64
 import os
-from typing import Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -144,7 +143,7 @@ class FieldEncryption:
 
 
 # Global encryption instance (lazy-loaded)
-_encryption_instance: Optional[FieldEncryption] = None
+_encryption_instance: FieldEncryption | None = None
 
 
 def get_encryption() -> FieldEncryption:
