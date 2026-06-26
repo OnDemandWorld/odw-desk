@@ -1,4 +1,4 @@
-# ODW.ai Desk
+# ODW Desk
 
 **Self-hosted, WhatsApp-first AI customer support agent with full data sovereignty.**
 
@@ -8,7 +8,7 @@
 
 ## Overview
 
-ODW.ai Desk is a production-ready, self-hosted AI customer support platform that keeps all conversation data within your infrastructure while delivering intelligent, context-aware responses grounded in your organization's knowledge base.
+ODW Desk is a production-ready, self-hosted AI customer support platform that keeps all conversation data within your infrastructure while delivering intelligent, context-aware responses grounded in your organization's knowledge base.
 
 Unlike cloud-based solutions that send customer data to third-party APIs, Desk maintains complete data sovereignty—ideal for regulated industries (healthcare, legal, fintech, government) where compliance and privacy are non-negotiable.
 
