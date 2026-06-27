@@ -12,6 +12,10 @@ ODW Desk is a production-ready, self-hosted AI customer support platform that ke
 
 Unlike cloud-based solutions that send customer data to third-party APIs, Desk maintains complete data sovereignty—ideal for regulated industries (healthcare, legal, fintech, government) where compliance and privacy are non-negotiable.
 
+## Status
+
+⚠️ **Early release.** ODW [Name] is an early, functional release — core features work, but it is not yet hardened for production. We are refining every module toward a first full public release in **Q3 2026**. Until then, it is best used as a foundation to build on with AI coding agents (see below).
+
 ## Key Features
 
 ### 🤖 AI Intelligence Pipeline
@@ -475,6 +479,9 @@ Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guideli
 5. Commit changes (`git commit -m 'Add amazing feature'`)
 6. Push to branch (`git push origin feature/amazing-feature`)
 7. Open Pull Request
+
+## Working with AI agents
+This repository is built to be extended with AI coding agents. Rather than a turnkey product, ODW [Name] is a working, well-structured codebase you can clone and adapt to your own needs with an agent like Claude Code. The repo includes agent context files (e.g. `CLAUDE.md`) and clear architecture docs so an agent can quickly understand the structure and help you customise, integrate, and extend it. To get started: clone the repo, open it with your coding agent, point it at this README and the docs, and describe what you want to build.
 
 ## License
 
