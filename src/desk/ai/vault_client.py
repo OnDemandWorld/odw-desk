@@ -1,8 +1,14 @@
 """
 ODW.ai Desk — Vault Client (AI-003)
 
-Queries ODW.ai Vault's retrieval API for relevant knowledge base documents.
+Queries ODW.ai Vault's RAG query API for relevant knowledge base chunks.
 Caches results in Redis for performance.
+
+Vault contract (see INTEGRATION_CONTRACT.md §1):
+- Base URL: http://127.0.0.1:8765
+- No authentication (do NOT send an Authorization header unless a real key is set)
+- Retrieval: POST /query  body {query, top_k_chunks, folder_filter?}
+- Health:    GET  /health -> {ollama, chroma, database, fasttext}
 """
 
 import hashlib
@@ -15,6 +21,13 @@ import structlog
 from desk.utils.redis_client import Cache, get_redis_manager
 
 logger = structlog.get_logger()
+
+# Vault ships with no auth. This is the dev placeholder key Desk historically
+# configured; when the key is empty or equals this default we send no header.
+_DEV_DEFAULT_API_KEY = "vk_dev_local_key"
+
+# Minimum fused_score for a retrieved chunk to be kept.
+_MIN_SCORE = 0.3
 
 
 @dataclass
@@ -49,20 +62,26 @@ class VaultClient:
         vault_api_key: str,
         default_collection_id: str,
         cache_ttl_seconds: int = 600,  # 10 minutes
+        collection_folder_map: dict[str, dict[str, Any]] | None = None,
     ):
         """
         Initialize Vault Client.
 
         Args:
             vault_url: Vault API base URL
-            vault_api_key: Vault API authentication key
+            vault_api_key: Vault API authentication key (Vault has no auth; the
+                header is only sent when a real, non-default key is configured)
             default_collection_id: Default knowledge base collection ID
             cache_ttl_seconds: Cache TTL in seconds (default: 10 minutes)
+            collection_folder_map: Optional mapping of collection_id -> Vault
+                folder_filter dict (e.g. {"folder_id": 1} or {"path_prefix": "..."}).
+                When a collection has an entry, its folder_filter is sent to Vault.
         """
         self.vault_url = vault_url.rstrip("/")
         self.vault_api_key = vault_api_key
         self.default_collection_id = default_collection_id
         self.cache_ttl_seconds = cache_ttl_seconds
+        self.collection_folder_map = collection_folder_map or {}
 
         # Initialize Redis cache
         redis_manager = get_redis_manager()
@@ -74,6 +93,13 @@ class VaultClient:
             collection_id=default_collection_id,
             cache_ttl=cache_ttl_seconds,
         )
+
+    def _auth_headers(self) -> dict[str, str]:
+        """Build request headers, only adding Authorization for a real key."""
+        headers = {"Content-Type": "application/json"}
+        if self.vault_api_key and self.vault_api_key != _DEV_DEFAULT_API_KEY:
+            headers["Authorization"] = f"Bearer {self.vault_api_key}"
+        return headers
 
     def _cache_key(self, collection_id: str, query: str, top_k: int) -> str:
         """Generate cache key for a retrieval query."""
@@ -108,36 +134,51 @@ class VaultClient:
 
         # Cache miss, query Vault API
         try:
+            payload: dict[str, Any] = {
+                "query": query,
+                "top_k_chunks": top_k,
+            }
+            folder_filter = self.collection_folder_map.get(collection)
+            if folder_filter:
+                payload["folder_filter"] = folder_filter
+
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
-                    f"{self.vault_url}/api/v1/retrieve",
-                    headers={
-                        "Authorization": f"Bearer {self.vault_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "query": query,
-                        "collection_id": collection,
-                        "top_k": top_k,
-                    },
+                    f"{self.vault_url}/query",
+                    headers=self._auth_headers(),
+                    json=payload,
                 )
                 response.raise_for_status()
                 result = response.json()
 
-            # Parse results
+            answer = result.get("answer", "")
+            citations = result.get("citations", [])
+
+            # Parse retrieved_chunks into the stable RetrievedDocument interface
             documents = []
-            for doc in result.get("documents", []):
+            for chunk in result.get("retrieved_chunks", []):
+                score = float(chunk.get("fused_score", 0.0) or 0.0)
                 documents.append(
                     RetrievedDocument(
-                        content=doc.get("content", ""),
-                        score=doc.get("score", 0.0),
-                        source_id=doc.get("source_id", ""),
-                        metadata=doc.get("metadata", {}),
+                        content=chunk.get("text", ""),
+                        score=score,
+                        source_id=str(chunk.get("rel_path") or chunk.get("file_id") or ""),
+                        metadata={
+                            "chunk_id": chunk.get("chunk_id"),
+                            "file_id": chunk.get("file_id"),
+                            "folder_id": chunk.get("folder_id"),
+                            "rel_path": chunk.get("rel_path"),
+                            "page_start": chunk.get("page_start"),
+                            "dense_score": chunk.get("dense_score"),
+                            "bm25_score": chunk.get("bm25_score"),
+                            "answer": answer,
+                            "citations": citations,
+                        },
                     )
                 )
 
-            # Filter low-confidence results (score < 0.3)
-            documents = [doc for doc in documents if doc.score >= 0.3]
+            # Filter low-confidence results (fused_score < 0.3)
+            documents = [doc for doc in documents if doc.score >= _MIN_SCORE]
 
             # Cache the results
             await self.cache.set(
@@ -168,12 +209,12 @@ class VaultClient:
             return []
 
     async def health_check(self) -> bool:
-        """Check if Vault API is reachable."""
+        """Check if Vault API is reachable (GET /health, True on HTTP 200)."""
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.get(
                     f"{self.vault_url}/health",
-                    headers={"Authorization": f"Bearer {self.vault_api_key}"},
+                    headers=self._auth_headers(),
                 )
                 return response.status_code == 200
         except Exception as e:

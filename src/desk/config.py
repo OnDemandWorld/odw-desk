@@ -79,7 +79,7 @@ class Settings(BaseSettings):
 
     # Vault (Knowledge Base)
     vault_url: str = Field(
-        default="http://localhost:8100", description="ODW.ai Vault base URL"
+        default="http://localhost:8765", description="ODW.ai Vault base URL"
     )
     vault_api_key: str = Field(
         default="vk_dev_local_key", description="Vault API authentication key"
