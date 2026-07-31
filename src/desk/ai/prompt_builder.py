@@ -9,6 +9,9 @@ from typing import Any
 
 import structlog
 
+from desk.i18n.messages import LANGUAGE_NAMES
+from desk.i18n.service import reply_language
+
 logger = structlog.get_logger()
 
 
@@ -65,6 +68,10 @@ Keep responses concise and focused on resolving the customer's issue."""
         """
         prompt_parts = []
 
+        # Instruct the model to reply in the user's detected language (F-Desk-1).
+        # Detection defaults to English, so this is a no-op for English input.
+        prompt_parts.append(self._language_instruction(user_message))
+
         # Add knowledge context if available
         if knowledge_context:
             knowledge_text = self._format_knowledge(knowledge_context)
@@ -86,6 +93,12 @@ Keep responses concise and focused on resolving the customer's issue."""
     def get_system_prompt(self) -> str:
         """Get the system prompt."""
         return self.system_prompt
+
+    def _language_instruction(self, user_message: str) -> str:
+        """Build the 'respond in {language}' instruction for the user's language."""
+        lang = reply_language(user_message)
+        language_name = LANGUAGE_NAMES.get(lang, lang)
+        return f"Respond in {language_name}."
 
     def _format_knowledge(self, knowledge_context: list[dict[str, Any]]) -> str:
         """Format knowledge base documents for prompt inclusion."""

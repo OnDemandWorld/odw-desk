@@ -22,6 +22,7 @@ This document tracks development progress by stage, following the TBK (Task Brea
 | Epic A: Brand Persona | ✅ Complete | 100% | PERSONA-001 ✅ - PERSONA-005 ✅ |
 | Epic B: Response Policy | ✅ Complete | 100% | POLICY-001 ✅ - POLICY-007 ✅ |
 | V1.1 M3: SLA Timing + Media (F6/F7) | ✅ Complete | 100% | D1 ✅ - D6 ✅ |
+| V1.2 M4: Desk Multilingual i18n (F-Desk-1) | ✅ Complete | 100% | I1 ✅ - I5 ✅ |
 
 **Legend:** ✅ Complete | 🟡 In Progress | ⚪ Not Started | 🔴 Blocked
 
@@ -259,6 +260,43 @@ This document tracks development progress by stage, following the TBK (Task Brea
 ---
 
 ## 📝 Development Log
+
+### 2026-08-01: V1.2 M4 Complete — Desk Multilingual i18n (F-Desk-1)
+
+**Status:** ✅ I1–I5 completed; `tests/unit` green (69 passed = 52 baseline + 17 new), ruff clean on changed files.
+
+**Work Completed:**
+- **I1 — i18n resources + service** (`src/desk/i18n/messages.py`, `service.py`):
+  `MESSAGES` resource table for `en` (source of truth) and `zh`, keyed by
+  `greeting`, `fallback_reply`, `escalation_notice`, `policy_block_pre`,
+  `policy_block_post`. `t(key, lang, **fmt)` resolves a template, falls back to
+  English for unknown languages/missing keys (and to the raw key as a last
+  resort), and applies `str.format` substitution. `reply_language(user_text,
+  conversation_lang?)` prefers a stored conversation language, else detects.
+- **I2 — Language detection** (`src/desk/i18n/detect.py`): `detect_language(text)`
+  is a dependency-free Unicode heuristic — any CJK ideograph ⇒ `zh`, otherwise
+  `en` (empty/`None`/failure ⇒ `en`). No existing Desk detector was available to
+  reuse (fasttext lid lives in Vault; the `language="en"` in `pii_shield` is only
+  Presidio config), so the designed heuristic fallback is used.
+- **I3 — Prompt language injection** (`src/desk/ai/prompt_builder.py`):
+  `build_prompt` prepends a `Respond in {language}.` instruction derived from the
+  detected user language (`LANGUAGE_NAMES` maps codes to display names).
+- **I4 — Multilingual system/fallback messages** (`src/desk/ai/engine.py`): the
+  hardcoded English stub, escalation, and policy-block strings are now
+  `t('fallback_reply', lang, snippet=...)`, `t('escalation_notice', lang)`,
+  `t('policy_block_pre'/'policy_block_post', lang)`, with `lang` detected once
+  from the inbound message. English values match the previous strings exactly, so
+  default behaviour is unchanged. `vault_client.py` untouched.
+- **I5 — Docs**: README (V1.2 feature section + project-structure tree) and
+  DEVELOPMENT updated for M4.
+
+**Notes / deviations:** The design listed `fallback_reply`/`escalation_notice`/
+`greeting`; the two hardcoded policy-block strings in `engine.py` were also
+internationalized (`policy_block_pre`/`policy_block_post`) to fully cover
+"system/fallback messages", with English kept byte-identical to preserve
+behaviour. The engine fallback test bypasses `AIEngine.__init__` (heavy provider/
+Presidio setup) via `object.__new__` and a raising PII shield to exercise the
+safe-fallback path deterministically.
 
 ### 2026-07-31: V1.1 M3 Complete — SLA Timing + Media (F6/F7)
 

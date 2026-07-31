@@ -44,6 +44,19 @@ Unlike cloud-based solutions that send customer data to third-party APIs, Desk m
 - **Outbound Media**: `send_media(recipient, media_type, media_link, caption?)` posts media
   messages through the WhatsApp Cloud API, falling back to a local stub when unconfigured.
 
+### 🌍 Multilingual AI Replies (V1.2)
+- **Language-Adaptive Responses**: The AI detects the language of each inbound
+  message and replies in kind (Chinese and English supported today). A lightweight
+  "respond in {language}" instruction is injected into the LLM prompt
+  (`desk.ai.prompt_builder`), and detection is a dependency-free Unicode heuristic
+  (`desk.i18n.detect`) — text containing CJK ideographs is treated as Chinese,
+  everything else as English.
+- **Multilingual System/Fallback Messages**: Stub, escalation, and policy-block
+  messages are served from a string-resource table (`desk.i18n.messages`) via
+  `t(key, lang, **fmt)` (`desk.i18n.service`). English is the source of truth and
+  the fallback, so default behaviour is unchanged when detection fails or a
+  language/key is missing. Add a language by extending the resource table.
+
 ### 👥 Human Agent Interface
 - **Agent Inbox**: REST API for conversation management, takeover, and response composition
 - **Real-time Dashboard**: WebSocket connections for live conversation monitoring
@@ -299,6 +312,10 @@ desk/
 │   │   └── state_machine.py
 │   ├── compliance/           # GDPR & audit
 │   │   └── engine.py
+│   ├── i18n/                 # Multilingual replies (V1.2)
+│   │   ├── detect.py        # Dependency-free language detection
+│   │   ├── messages.py      # String resources (en/zh)
+│   │   └── service.py       # t() translation + reply_language()
 │   ├── license/              # License management
 │   │   └── manager.py
 │   ├── persona/              # Brand persona

@@ -17,6 +17,7 @@ from desk.ai.providers.openai import OpenAIProvider
 from desk.ai.vault_client import RetrievedDocument, get_vault_client
 from desk.config import get_settings
 from desk.db import AsyncSessionLocal
+from desk.i18n.service import reply_language, t
 from desk.persona.integration import get_prompt_builder_with_persona
 from desk.policy.engine import PolicyEngine
 from desk.schemas.channels import OutboundMessage
@@ -83,6 +84,10 @@ class AIEngine:
         """
         logger.info("Processing message through AI pipeline", conversation_id=conversation_id)
 
+        # Detect the reply language from the inbound message (F-Desk-1). Defaults
+        # to English so detection failures keep the existing behaviour.
+        lang = reply_language(content)
+
         try:
             # Step 1: PII Detection
             pii_result: PIIResult = await self.pii_shield.analyze(content)
@@ -99,7 +104,7 @@ class AIEngine:
 
                 if policy_result["policy_decision"] == "block":
                     logger.info("Message blocked by policy", triggers=policy_result["triggers"])
-                    return policy_result["redirect_response"] or "I'm unable to respond to that message."
+                    return policy_result["redirect_response"] or t("policy_block_pre", lang)
 
             # Step 2: Model Routing
             routing_decision: RoutingDecision = await self.model_router.route(
@@ -157,7 +162,7 @@ class AIEngine:
             except Exception as e:
                 logger.error("LLM inference failed", error=str(e))
                 # Fall back to stub response
-                return f"Thanks for your message! We'll get back to you shortly. (Received: {content[:50]})"
+                return t("fallback_reply", lang, snippet=content[:50])
 
             # Step 5.5: Post-generation Policy Check
             async with AsyncSessionLocal() as db:
@@ -169,7 +174,7 @@ class AIEngine:
 
                 if post_policy_result["action"] == "block":
                     logger.warning("Response blocked by post-generation policy", violations=post_policy_result["violations"])
-                    return "I apologize, but I cannot provide that response."
+                    return t("policy_block_post", lang)
 
             # Step 6: Confidence Scoring
             confidence: ConfidenceScore = await self.confidence_scorer.score(
@@ -193,7 +198,7 @@ class AIEngine:
                     reasoning=confidence.reasoning,
                 )
                 # Return a fallback message indicating escalation
-                return "I'm not confident I can help with that. Let me connect you with a human agent who can assist you better."
+                return t("escalation_notice", lang)
 
             # Return AI response
             return llm_response.text
@@ -201,7 +206,7 @@ class AIEngine:
         except Exception as e:
             logger.error("AI pipeline failed", error=str(e), conversation_id=conversation_id)
             # Return a safe fallback (stub response for testing)
-            return f"Thanks for your message! We'll get back to you shortly. (Received: {content[:50]})"
+            return t("fallback_reply", lang, snippet=content[:50])
 
     def _select_provider(self, routing_decision: RoutingDecision) -> LLMProvider:
         """Select LLM provider based on routing decision."""
