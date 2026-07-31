@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     deployment_id: str = Field(
         default="dev-local-001", description="Unique deployment identifier"
     )
+    desk_api_key: str = Field(
+        default="",
+        description=(
+            "Optional API key guarding /api/v1/admin/* and /api/v1/agents/*. "
+            "When empty, those routes stay open (backward compatible / dev)."
+        ),
+    )
 
     # Event Bus
     event_bus_backend: Literal["redis_streams", "nats"] = Field(
@@ -105,6 +112,17 @@ class Settings(BaseSettings):
     )
     whatsapp_webhook_verify_token: str = Field(
         default="dev_verify_token", description="WhatsApp webhook verification token"
+    )
+    whatsapp_app_secret: str = Field(
+        default="",
+        description=(
+            "WhatsApp app secret used to verify inbound webhook HMAC signatures "
+            "(X-Hub-Signature-256). When empty, signature verification is skipped (dev only)."
+        ),
+    )
+    whatsapp_graph_api_base_url: str = Field(
+        default="https://graph.facebook.com/v19.0",
+        description="Meta Graph API base URL for WhatsApp Cloud API (overridable for tests)",
     )
     whatsapp_business_account_id: str = Field(
         default="", description="WhatsApp business account ID"

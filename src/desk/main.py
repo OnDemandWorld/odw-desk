@@ -9,8 +9,10 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
 
 from desk.admin.api import router as admin_router
@@ -27,6 +29,7 @@ from desk.channels.whatsapp_business import router as whatsapp_router
 from desk.config import get_settings
 from desk.db import get_engine
 from desk.events.redis_streams import RedisStreamsEventBus
+from desk.security.api_auth import require_api_key
 from desk.utils.redis_client import get_redis_manager
 from desk.workers.message_processor import MessageProcessor
 
@@ -122,12 +125,17 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Optional API key guard for admin + agent inbox routes. When DESK_API_KEY is
+    # unset the dependency is a no-op, so routes stay open (backward compatible).
+    # Health (/health) and webhooks (/api/v1/webhooks/*) are intentionally NOT guarded.
+    api_guard = [Depends(require_api_key)]
+
     # Include routers (CORE-001, AGENT-001, etc.)
     app.include_router(whatsapp_router)
-    app.include_router(agent_router)
+    app.include_router(agent_router, dependencies=api_guard)
     app.include_router(websocket_router)
-    app.include_router(admin_router)
-    app.include_router(persona_policy_router)
+    app.include_router(admin_router, dependencies=api_guard)
+    app.include_router(persona_policy_router, dependencies=api_guard)
     # app.include_router(webchat_router)
 
     @app.get("/health", tags=["Health"])
@@ -147,9 +155,7 @@ def create_app() -> FastAPI:
             engine = get_engine()
             async with engine.connect() as conn:
                 result = await conn.execute(text("SELECT 1"))
-                scalar_result = result.scalar()
-                if scalar_result is not None:
-                    await scalar_result
+                result.scalar()
         except Exception as exc:  # noqa: BLE001
             db_health = {"status": "unhealthy", "error": str(exc)}
 
@@ -178,6 +184,16 @@ def create_app() -> FastAPI:
             "version": settings.app_version,
             "docs": "/docs" if settings.environment != "production" else None,
         }
+
+    @app.get("/metrics", tags=["Observability"])
+    async def metrics() -> Response:
+        """
+        Prometheus metrics endpoint.
+
+        Exposes all counters/gauges/histograms defined in
+        ``desk.observability.metrics`` in the Prometheus text exposition format.
+        """
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return app
 
