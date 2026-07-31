@@ -21,6 +21,7 @@ This document tracks development progress by stage, following the TBK (Task Brea
 | Phase 6: Multi-Channel Expansion | ⚪ Not Started | 0% | CHANNEL-001/002/003/004/005/006 ⚪ |
 | Epic A: Brand Persona | ✅ Complete | 100% | PERSONA-001 ✅ - PERSONA-005 ✅ |
 | Epic B: Response Policy | ✅ Complete | 100% | POLICY-001 ✅ - POLICY-007 ✅ |
+| V1.1 M3: SLA Timing + Media (F6/F7) | ✅ Complete | 100% | D1 ✅ - D6 ✅ |
 
 **Legend:** ✅ Complete | 🟡 In Progress | ⚪ Not Started | 🔴 Blocked
 
@@ -258,6 +259,37 @@ This document tracks development progress by stage, following the TBK (Task Brea
 ---
 
 ## 📝 Development Log
+
+### 2026-07-31: V1.1 M3 Complete — SLA Timing + Media (F6/F7)
+
+**Status:** ✅ D1–D6 completed; `tests/unit` green (52 passed), ruff clean on changed files.
+
+**Work Completed:**
+- **D1 — SLA policy** (`src/desk/sla/policy.py`): `SLAPolicy.from_settings()` builds
+  thresholds from the existing `sla_first_response_minutes` and `sla_resolution_hours`
+  settings (resolution converted to minutes). No new env vars; defaults unchanged.
+- **D2 — SLA service** (`src/desk/sla/service.py`): `SLAService.evaluate(conversation, now)`
+  → `SLAStatus` (ok / breached_first_response / breached_resolution). Maps onto the real
+  schema: `created_at` anchors the windows, explicit `sla_*_due` deadlines are honoured
+  when present, and "first response" = earliest `ai`/`agent` message (no dedicated column).
+  `escalate(conversation_id, reason)` flips status to `escalated` via the existing
+  `ConversationManager`/state machine and publishes a best-effort `sla.breach` event.
+- **D3 — Checker** (`src/desk/sla/checker.py`): `scan_due_conversations(db, service?)`
+  scans active-life conversations (new/active/pending), escalates breached ones, returns
+  `{scanned, breached, escalated}`. Scheduling wiring is an ops concern (out of scope).
+- **D4 — Inbound media** (`whatsapp_business.py`): image/document/audio/video messages parse
+  `media_id`/`mime_type`/`caption` into metadata (caption becomes content when present);
+  `resolve_media_url(media_id)` resolves the Graph download URL (`GET {base}/{media_id}`),
+  injectable/mockable. No large binaries stored.
+- **D5 — Outbound media** (`whatsapp_business.py`): `send_media(recipient, media_type,
+  media_link, caption?)` posts `{messaging_product, to, type, <type>:{link}, caption?}` to
+  `{base}/{phone_number_id}/messages`, parses `messages[0].id`; stubs when unconfigured.
+- **D6 — Docs**: README + DEVELOPMENT updated for M3.
+
+**Notes / deviations:** The design proposed new `sla_resolution_minutes` config; the codebase
+already had `sla_first_response_minutes` + `sla_resolution_hours`, so the policy reuses those
+to stay backward compatible. Escalation only succeeds from `active` (state machine allows only
+`active → escalated`); other active-life states are skipped best-effort.
 
 ### 2026-06-24: Project Initialization
 

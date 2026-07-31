@@ -29,6 +29,9 @@ router = APIRouter(prefix="/api/v1/webhooks", tags=["WhatsApp"])
 # Default Meta Graph API base URL for the WhatsApp Cloud API.
 DEFAULT_GRAPH_API_BASE_URL = "https://graph.facebook.com/v19.0"
 
+# WhatsApp message types that carry a media payload (id / mime_type / caption).
+MEDIA_MESSAGE_TYPES = ("image", "document", "audio", "video")
+
 
 class WhatsAppBusinessAdapter(ChannelAdapter):
     """
@@ -145,6 +148,134 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
                 "error": str(exc),
             }
 
+    async def send_media(
+        self,
+        recipient: str,
+        media_type: str,
+        media_link: str,
+        caption: str | None = None,
+    ) -> dict:
+        """
+        Send an outbound media message via the WhatsApp Cloud API.
+
+        Args:
+            recipient: Recipient phone number / identifier.
+            media_type: One of ``image`` / ``document`` / ``audio`` / ``video``.
+            media_link: Publicly reachable media URL (sent as ``{"link": ...}``).
+            caption: Optional caption (included only when provided).
+
+        Returns:
+            Result dict with ``success`` and ``channel_message_id``. When
+            credentials are not configured, falls back to a local dev stub
+            (consistent with the text ``send`` path) without any HTTP call.
+        """
+        self.health_status.messages_sent += 1
+
+        access_token = self.settings.whatsapp_access_token
+        phone_number_id = self.settings.whatsapp_phone_number_id
+
+        if not access_token or not phone_number_id:
+            logger.warning(
+                "WhatsApp Business API credentials not configured; media send is stubbed",
+                recipient=recipient,
+                media_type=media_type,
+            )
+            return {
+                "success": True,
+                "channel_message_id": "wamid.stub",
+                "message": "WhatsApp media send stubbed (no credentials)",
+            }
+
+        url = f"{self.graph_api_base_url}/{phone_number_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+        body: dict = {
+            "messaging_product": "whatsapp",
+            "to": recipient,
+            "type": media_type,
+            media_type: {"link": media_link},
+        }
+        if caption:
+            body["caption"] = caption
+
+        logger.info(
+            "Sending WhatsApp media message",
+            recipient=recipient,
+            media_type=media_type,
+        )
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(url, headers=headers, json=body)
+                response.raise_for_status()
+                result = response.json()
+
+            channel_message_id = None
+            messages = result.get("messages") or []
+            if messages:
+                channel_message_id = messages[0].get("id")
+
+            return {
+                "success": True,
+                "channel_message_id": channel_message_id,
+                "message": "WhatsApp media message sent",
+            }
+        except httpx.HTTPStatusError as exc:
+            logger.error(
+                "WhatsApp Cloud API media error",
+                status_code=exc.response.status_code,
+                error=exc.response.text,
+                recipient=recipient,
+            )
+            return {
+                "success": False,
+                "channel_message_id": None,
+                "error": f"Graph API error: {exc.response.status_code}",
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "WhatsApp media send failed",
+                error=str(exc),
+                recipient=recipient,
+            )
+            return {
+                "success": False,
+                "channel_message_id": None,
+                "error": str(exc),
+            }
+
+    async def resolve_media_url(self, media_id: str) -> str | None:
+        """
+        Resolve the Graph API download URL for an inbound media object.
+
+        Calls ``GET {graph_api_base_url}/{media_id}`` which returns a temporary
+        download ``url``. Injectable/mockable via ``graph_api_base_url``. Returns
+        None when credentials are missing or the lookup fails (best-effort).
+        """
+        access_token = self.settings.whatsapp_access_token
+        if not access_token:
+            logger.warning(
+                "WhatsApp credentials not configured; cannot resolve media URL",
+                media_id=media_id,
+            )
+            return None
+
+        url = f"{self.graph_api_base_url}/{media_id}"
+        headers = {"Authorization": f"Bearer {access_token}"}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                return response.json().get("url")
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "WhatsApp media URL resolution failed",
+                media_id=media_id,
+                error=str(exc),
+            )
+            return None
+
     async def health_check(self) -> AdapterHealthStatus:
         """Return adapter health status."""
         return self.health_status
@@ -210,17 +341,28 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
                 for message_data in value.get("messages", []):
                     message_type = message_data.get("type", "text")
                     content = ""
+                    media_metadata: dict = {}
 
                     if message_type == "text":
                         content = message_data.get("text", {}).get("body", "")
-                    elif message_type == "image":
-                        content = "[image]"
-                    elif message_type == "audio":
-                        content = "[audio]"
-                    elif message_type == "video":
-                        content = "[video]"
-                    elif message_type == "document":
-                        content = "[document]"
+                    elif message_type in MEDIA_MESSAGE_TYPES:
+                        # Media messages carry {id, mime_type, caption?} under a
+                        # key named after the message type. We store identifiers
+                        # and metadata only — large binaries are NOT downloaded
+                        # or persisted (the download URL is resolved on demand
+                        # via ``resolve_media_url``).
+                        media = message_data.get(message_type, {}) or {}
+                        caption = media.get("caption")
+                        media_metadata = {
+                            "media_type": message_type,
+                            "media_id": media.get("id"),
+                            "mime_type": media.get("mime_type"),
+                            "caption": caption,
+                        }
+                        content = caption or f"[{message_type}]"
+                    else:
+                        # Unknown/unsupported types keep a bracketed placeholder.
+                        content = f"[{message_type}]"
 
                     from_data = message_data.get("from", {})
                     phone_number = from_data if isinstance(from_data, str) else from_data.get("id", "")
@@ -232,6 +374,13 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
                     except (TypeError, ValueError):
                         timestamp = datetime.now(tz=UTC)
 
+                    metadata = {
+                        "phone_number_id": phone_number_id,
+                        "message_type": message_type,
+                        "whatsapp_message_id": message_data.get("id", ""),
+                    }
+                    metadata.update(media_metadata)
+
                     inbound = InboundMessage(
                         message_id=message_data.get("id", ""),
                         conversation_id=phone_number,  # Use phone number as conversation ID for WhatsApp
@@ -240,11 +389,7 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
                         sender_type="customer",
                         content=content,
                         media_urls=[],
-                        metadata={
-                            "phone_number_id": phone_number_id,
-                            "message_type": message_type,
-                            "whatsapp_message_id": message_data.get("id", ""),
-                        },
+                        metadata=metadata,
                         timestamp=timestamp,
                     )
                     messages.append(inbound)

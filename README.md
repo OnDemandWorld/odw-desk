@@ -31,6 +31,19 @@ Unlike cloud-based solutions that send customer data to third-party APIs, Desk m
 - **Extensible Architecture**: Plugin system ready for Telegram, Discord, Slack, Signal, and iMessage adapters
 - **Real-time Updates**: WebSocket-based live conversation monitoring for agents
 
+### ⏱️ SLA Timing & Media (V1.1)
+- **SLA Evaluation & Escalation**: Conversations are evaluated against configurable
+  first-response and resolution thresholds (`SLA_FIRST_RESPONSE_MINUTES`,
+  `SLA_RESOLUTION_HOURS`). Breaches flip the conversation to the `escalated` state
+  via the existing state machine and emit a best-effort `sla.breach` event
+  (`desk.sla.policy` / `desk.sla.service`). `desk.sla.checker.scan_due_conversations`
+  scans active conversations and escalates those in breach (scheduling is an ops concern).
+- **Inbound Media**: WhatsApp image/document/audio/video messages are parsed into
+  `media_id` / `mime_type` / `caption` metadata; the Graph API download URL is resolved
+  on demand via `resolve_media_url` (identifiers + metadata are stored, not large binaries).
+- **Outbound Media**: `send_media(recipient, media_type, media_link, caption?)` posts media
+  messages through the WhatsApp Cloud API, falling back to a local stub when unconfigured.
+
 ### 👥 Human Agent Interface
 - **Agent Inbox**: REST API for conversation management, takeover, and response composition
 - **Real-time Dashboard**: WebSocket connections for live conversation monitoring
