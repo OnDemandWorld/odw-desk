@@ -28,6 +28,7 @@ Unlike cloud-based solutions that send customer data to third-party APIs, Desk m
 
 ### 💬 Channel Support
 - **WhatsApp Business API**: Full support for Meta's official WhatsApp Business Platform
+- **Web-chat (V1.3)**: WebSocket browser chat (`WS /ws/chat/{visitor_id}`) sharing the same conversation/agent pipeline as WhatsApp
 - **Extensible Architecture**: Plugin system ready for Telegram, Discord, Slack, Signal, and iMessage adapters
 - **Real-time Updates**: WebSocket-based live conversation monitoring for agents
 
@@ -278,6 +279,14 @@ POST   /api/v1/admin/compliance/delete
 WS /ws/agents/{agent_id}
 ```
 Real-time conversation updates for agents.
+
+```
+WS /ws/chat/{visitor_id}
+```
+Web-chat channel (V1.3). Send plain-text frames as a visitor; each message is
+routed through the shared pipeline (channel `webchat`) and acknowledged with a
+`{"type": "routed", "conversation_id": ...}` envelope. Outbound replies are
+pushed back as `{"type": "reply", "content": ...}` frames.
 
 ## Development
 

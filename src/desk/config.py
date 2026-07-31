@@ -78,6 +78,13 @@ class Settings(BaseSettings):
             "When empty, those routes stay open (backward compatible / dev)."
         ),
     )
+    desk_default_role: Literal["admin", "agent"] = Field(
+        default="admin",
+        description=(
+            "Role assumed by an authenticated principal when none is supplied via "
+            "JWT claim or the X-Desk-Role header. Defaults to admin for dev single-user."
+        ),
+    )
 
     # Event Bus
     event_bus_backend: Literal["redis_streams", "nats"] = Field(

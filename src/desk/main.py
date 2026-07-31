@@ -24,12 +24,14 @@ from desk.channels.base import AdapterConfig
 from desk.channels.manager import ChannelAdapterManager
 from desk.channels.mock import MockChannelAdapter
 from desk.channels.outbound import OutboundDispatcher
+from desk.channels.webchat import router as webchat_router
 from desk.channels.whatsapp_business import get_adapter as get_whatsapp_adapter
 from desk.channels.whatsapp_business import router as whatsapp_router
 from desk.config import get_settings
 from desk.db import get_engine
 from desk.events.redis_streams import RedisStreamsEventBus
 from desk.security.api_auth import require_api_key
+from desk.security.rbac import require_role
 from desk.utils.redis_client import get_redis_manager
 from desk.workers.message_processor import MessageProcessor
 
@@ -130,13 +132,19 @@ def create_app() -> FastAPI:
     # Health (/health) and webhooks (/api/v1/webhooks/*) are intentionally NOT guarded.
     api_guard = [Depends(require_api_key)]
 
+    # RBAC (F-RBAC-Desk): role guards layered on top of the API-key guard.
+    # admin routes require admin; agent inbox routes require agent or above.
+    # Both are no-ops when DESK_API_KEY is unset (backward compatible).
+    admin_guard = [Depends(require_api_key), Depends(require_role("admin"))]
+    agent_guard = [Depends(require_api_key), Depends(require_role("agent"))]
+
     # Include routers (CORE-001, AGENT-001, etc.)
     app.include_router(whatsapp_router)
-    app.include_router(agent_router, dependencies=api_guard)
+    app.include_router(agent_router, dependencies=agent_guard)
     app.include_router(websocket_router)
-    app.include_router(admin_router, dependencies=api_guard)
+    app.include_router(webchat_router)
+    app.include_router(admin_router, dependencies=admin_guard)
     app.include_router(persona_policy_router, dependencies=api_guard)
-    # app.include_router(webchat_router)
 
     @app.get("/health", tags=["Health"])
     async def health_check() -> dict:

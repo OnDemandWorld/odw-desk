@@ -65,7 +65,7 @@ class ComplianceEngine:
             Created AuditLog entry
         """
         # Get the latest audit log entry for hash chaining
-        query = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(1)
+        query = select(AuditLog).order_by(AuditLog.timestamp.desc()).limit(1)
         result = await self.db.execute(query)
         latest_log = result.scalar_one_or_none()
 
@@ -121,7 +121,7 @@ class ComplianceEngine:
         Returns:
             Verification result with status and any issues found
         """
-        query = select(AuditLog).order_by(AuditLog.created_at.asc())
+        query = select(AuditLog).order_by(AuditLog.timestamp.asc())
         result = await self.db.execute(query)
         logs = result.scalars().all()
 
@@ -148,7 +148,7 @@ class ComplianceEngine:
                 "details": log.details,
                 "ip_address": log.ip_address,
                 "previous_hash": log.previous_hash,
-                "timestamp": log.created_at.isoformat() if log.created_at else None,
+                "timestamp": log.timestamp.isoformat() if log.timestamp else None,
             }
             log_json = json.dumps(log_data, sort_keys=True)
             expected_hash = hashlib.sha256(log_json.encode()).hexdigest()

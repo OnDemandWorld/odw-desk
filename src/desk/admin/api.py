@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from desk.compliance.service import VALID_DELETE_MODES, ComplianceService
 from desk.config import get_settings
 from desk.dependencies import get_db
 from desk.models.ai_configuration import AIConfiguration
@@ -253,9 +254,9 @@ async def get_audit_logs(
     if action:
         query = query.where(AuditLog.action == action)
     if actor_id:
-        query = query.where(AuditLog.actor_id == str(actor_id))
+        query = query.where(AuditLog.actor_id == actor_id)
 
-    query = query.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit)
+    query = query.order_by(AuditLog.timestamp.desc()).offset(offset).limit(limit)
 
     result = await db.execute(query)
     logs = result.scalars().all()
@@ -265,15 +266,15 @@ async def get_audit_logs(
             {
                 "id": str(log.id),
                 "action": log.action,
-                "actor_id": log.actor_id,
+                "actor_id": str(log.actor_id) if log.actor_id else None,
                 "actor_type": log.actor_type,
                 "resource_type": log.resource_type,
-                "resource_id": log.resource_id,
+                "resource_id": str(log.resource_id),
                 "details": log.details,
                 "ip_address": log.ip_address,
                 "previous_hash": log.previous_hash[:16] + "..." if log.previous_hash else None,
                 "hash": log.hash[:16] + "..." if log.hash else None,
-                "created_at": log.created_at.isoformat() if log.created_at else None,
+                "timestamp": log.timestamp.isoformat() if log.timestamp else None,
             }
             for log in logs
         ],
@@ -286,61 +287,54 @@ async def get_audit_logs(
 @router.post("/compliance/export")
 async def export_customer_data(
     customer_id: UUID = Query(..., description="Customer ID to export"),
-    format: str = Query("json", description="Export format (json, csv)"),
+    actor_id: str = Query("system", description="Actor requesting the export (for audit)"),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """
     Export customer data (GDPR Article 20 - Right to data portability).
 
-    Returns a download URL for the export file.
+    Aggregates the customer's profile, conversations, and messages into a
+    machine-readable JSON payload and writes an audit record.
     """
-    # In production, this would:
-    # 1. Query all customer data (conversations, messages, metadata)
-    # 2. Generate export file (JSON/CSV)
-    # 3. Upload to S3
-    # 4. Return presigned URL
+    service = ComplianceService(db)
+    try:
+        export = await service.export_customer_data(customer_id, actor_id=actor_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    logger.info("Customer data export requested", customer_id=str(customer_id), format=format)
-
-    return {
-        "success": True,
-        "message": "Export initiated",
-        "customer_id": str(customer_id),
-        "format": format,
-        "download_url": f"/api/v1/compliance/exports/{customer_id}/download",
-        "estimated_completion": "2 minutes",
-    }
+    return {"success": True, "format": "json", "export": export}
 
 
 @router.post("/compliance/delete")
 async def delete_customer_data(
     customer_id: UUID = Query(..., description="Customer ID to delete"),
     reason: str = Query(..., description="Deletion reason"),
+    mode: str = Query("anonymize", description="Erasure strategy: anonymize (default) or hard"),
+    actor_id: str = Query("system", description="Actor requesting the deletion (for audit)"),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """
     Delete customer data (GDPR Article 17 - Right to erasure).
 
-    Marks customer data for deletion and logs the request.
+    ``anonymize`` (default) replaces PII with placeholders while preserving
+    conversation structure; ``hard`` deletes messages, conversations, and the
+    customer record. The operation is transactional and writes an audit record.
     """
-    # In production, this would:
-    # 1. Mark customer and all related data for deletion
-    # 2. Schedule async deletion job
-    # 3. Log to audit trail
-    # 4. Send confirmation when complete
+    if mode not in VALID_DELETE_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid mode '{mode}'; expected one of {list(VALID_DELETE_MODES)}",
+        )
 
-    logger.info(
-        "Customer data deletion requested",
-        customer_id=str(customer_id),
-        reason=reason,
-    )
+    service = ComplianceService(db)
+    try:
+        summary = await service.delete_customer_data(
+            customer_id, mode=mode, actor_id=actor_id, reason=reason
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    return {
-        "success": True,
-        "message": "Deletion initiated",
-        "customer_id": str(customer_id),
-        "estimated_completion": "24 hours",
-    }
+    return {"success": True, **summary}
 
 
 @router.get("/compliance/reports")
