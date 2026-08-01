@@ -223,6 +223,213 @@ class TestDeleteCustomerData:
             await service.delete_customer_data(uuid4(), mode="hard")
 
 
+def _conversation_with_vault_files(customer_id, file_ids):
+    """A conversation whose metadata records associated Vault file ids."""
+    conv = _conversation(customer_id)
+    conv.metadata_ = {"vault_file_ids": file_ids}
+    return conv
+
+
+def _mock_vault_client(delete_side_effect):
+    """Build a mock Vault client whose delete_file is an AsyncMock."""
+    client = MagicMock()
+    client.delete_file = AsyncMock(side_effect=delete_side_effect)
+    return client
+
+
+class TestEraseCustomerVaultData:
+    """E2 — best-effort cross-product erasure of a customer's Vault files."""
+
+    async def test_with_ids_calls_delete_and_summarizes(self):
+        customer = _customer()
+        conv = _conversation_with_vault_files(customer.id, ["f1"])
+        msg1 = _message(conv.id, "a")
+        msg1.metadata_ = {"vault_file_ids": ["f2"]}
+        msg2 = _message(conv.id, "b")
+        msg2.metadata_ = {"vault_file_ids": ["f1"]}  # duplicate -> deduped
+
+        db = _mock_db(
+            [
+                _result(items=[conv]),  # _get_conversations (collection)
+                _result(items=[msg1, msg2]),  # _get_messages(conv)
+            ]
+        )
+        vault = _mock_vault_client([True, True])
+
+        with patch("desk.compliance.service.get_vault_client", return_value=vault):
+            service = ComplianceService(db)
+            summary = await service.erase_customer_vault_data(customer.id)
+
+        assert summary == {"attempted": 2, "erased": 2, "failed": 0}
+        # f1 (conversation) + f2 (message), deduped, order preserved
+        assert [c.args[0] for c in vault.delete_file.call_args_list] == ["f1", "f2"]
+
+    async def test_without_ids_skips_delete(self):
+        customer = _customer()
+        conv = _conversation(customer.id)  # no vault_file_ids
+        msg = _message(conv.id, "hi")  # message metadata has no vault_file_ids
+
+        db = _mock_db([_result(items=[conv]), _result(items=[msg])])
+        vault = _mock_vault_client([])
+
+        with patch("desk.compliance.service.get_vault_client", return_value=vault):
+            service = ComplianceService(db)
+            summary = await service.erase_customer_vault_data(customer.id)
+
+        assert summary == {"attempted": 0, "erased": 0, "failed": 0}
+        vault.delete_file.assert_not_awaited()
+
+    async def test_partial_failure_summarized(self):
+        customer = _customer()
+        conv = _conversation_with_vault_files(customer.id, ["f1", "f2", "f3"])
+
+        db = _mock_db([_result(items=[conv]), _result(items=[])])
+        vault = _mock_vault_client([True, False, True])
+
+        with patch("desk.compliance.service.get_vault_client", return_value=vault):
+            service = ComplianceService(db)
+            summary = await service.erase_customer_vault_data(customer.id)
+
+        assert summary == {"attempted": 3, "erased": 2, "failed": 1}
+
+    async def test_delete_raising_is_counted_as_failed_not_fatal(self):
+        customer = _customer()
+        conv = _conversation_with_vault_files(customer.id, ["f1", "f2"])
+
+        db = _mock_db([_result(items=[conv]), _result(items=[])])
+        vault = _mock_vault_client([RuntimeError("boom"), True])
+
+        with patch("desk.compliance.service.get_vault_client", return_value=vault):
+            service = ComplianceService(db)
+            summary = await service.erase_customer_vault_data(customer.id)
+
+        assert summary == {"attempted": 2, "erased": 1, "failed": 1}
+
+
+class TestDeleteCustomerCrossProductErasure:
+    """E3 — delete_customer_data wires cross-product erasure + audit (best-effort)."""
+
+    async def test_delete_triggers_erasure_and_audit(self, mock_redis):
+        customer = _customer()
+        conv = _conversation_with_vault_files(customer.id, ["f1", "f2"])
+        msg = _message(conv.id, "secret")
+
+        db = _mock_db(
+            [
+                _result(scalar=customer),  # _get_customer
+                _result(items=[conv]),  # _get_conversations
+                _result(items=[msg]),  # _get_messages(conv) in _anonymize
+            ]
+        )
+        vault = _mock_vault_client([True, True])
+
+        with (
+            patch("desk.compliance.service.get_vault_client", return_value=vault),
+            patch.object(ComplianceEngine, "log_audit_event", new_callable=AsyncMock) as audit,
+        ):
+            service = ComplianceService(db)
+            result = await service.delete_customer_data(
+                customer.id, mode="anonymize", actor_id="admin-1", reason="gdpr"
+            )
+
+        # Local erasure still happened
+        assert customer.display_name == "[anonymized]"
+        # Vault files erased + summarized
+        assert result["vault_erasure"] == {"attempted": 2, "erased": 2, "failed": 0}
+        assert [c.args[0] for c in vault.delete_file.call_args_list] == ["f1", "f2"]
+        # Two audit records: the local delete + the vault erasure
+        actions = [c.kwargs["action"] for c in audit.call_args_list]
+        assert actions == ["delete", "gdpr.vault_erasure"]
+        erasure_details = audit.call_args_list[1].kwargs["details"]
+        assert erasure_details == {"attempted": 2, "erased": 2, "failed": 0}
+
+    async def test_vault_failure_does_not_block_local_delete(self, mock_redis):
+        customer = _customer()
+        conv = _conversation_with_vault_files(customer.id, ["f1"])
+
+        db = _mock_db(
+            [
+                _result(scalar=customer),  # _get_customer
+                _result(items=[conv]),  # _get_conversations
+                _result(rowcount=1),  # delete(Message) for conv (hard delete)
+            ]
+        )
+        vault = _mock_vault_client([False])  # Vault refuses / unreachable
+
+        with (
+            patch("desk.compliance.service.get_vault_client", return_value=vault),
+            patch.object(ComplianceEngine, "log_audit_event", new_callable=AsyncMock) as audit,
+        ):
+            service = ComplianceService(db)
+            result = await service.delete_customer_data(
+                customer.id, mode="hard", actor_id="admin-1", reason="gdpr"
+            )
+
+        # Local hard delete completed despite Vault failure
+        deleted_targets = {call.args[0] for call in db.delete.call_args_list}
+        assert conv in deleted_targets
+        assert customer in deleted_targets
+        assert result["mode"] == "hard"
+        # Vault failure recorded in the summary, not raised
+        assert result["vault_erasure"] == {"attempted": 1, "erased": 0, "failed": 1}
+        # The erasure is still audited (best-effort trail of the failure)
+        actions = [c.kwargs["action"] for c in audit.call_args_list]
+        assert "gdpr.vault_erasure" in actions
+
+    async def test_no_vault_ids_means_no_erasure_audit(self, mock_redis):
+        customer = _customer()
+        conv = _conversation(customer.id)  # no vault_file_ids
+
+        db = _mock_db(
+            [
+                _result(scalar=customer),  # _get_customer
+                _result(items=[conv]),  # _get_conversations
+                _result(items=[]),  # _get_messages(conv) in _anonymize
+            ]
+        )
+        vault = _mock_vault_client([])
+
+        with (
+            patch("desk.compliance.service.get_vault_client", return_value=vault),
+            patch.object(ComplianceEngine, "log_audit_event", new_callable=AsyncMock) as audit,
+        ):
+            service = ComplianceService(db)
+            result = await service.delete_customer_data(customer.id)
+
+        vault.delete_file.assert_not_awaited()
+        assert "vault_erasure" not in result
+        # Only the local delete audit; no gdpr.vault_erasure for a no-op
+        assert [c.kwargs["action"] for c in audit.call_args_list] == ["delete"]
+
+    async def test_erasure_disabled_by_config_is_skipped(self, mock_redis):
+        customer = _customer()
+        conv = _conversation_with_vault_files(customer.id, ["f1"])
+
+        db = _mock_db(
+            [
+                _result(scalar=customer),  # _get_customer
+                _result(items=[conv]),  # _get_conversations
+                _result(items=[]),  # _get_messages(conv) in _anonymize
+            ]
+        )
+        vault = _mock_vault_client([])
+
+        settings = MagicMock()
+        settings.compliance_cross_product_erasure = False
+
+        with (
+            patch("desk.compliance.service.get_vault_client", return_value=vault),
+            patch("desk.compliance.service.get_settings", return_value=settings),
+            patch.object(ComplianceEngine, "log_audit_event", new_callable=AsyncMock) as audit,
+        ):
+            service = ComplianceService(db)
+            result = await service.delete_customer_data(customer.id)
+
+        vault.delete_file.assert_not_awaited()
+        assert "vault_erasure" not in result
+        assert [c.kwargs["action"] for c in audit.call_args_list] == ["delete"]
+
+
 class TestAuditWriter:
     """DB1 — the reused tamper-evident audit writer persists an AuditLog."""
 

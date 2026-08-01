@@ -23,13 +23,32 @@ import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from desk.ai.vault_client import get_vault_client
 from desk.compliance.engine import ComplianceEngine
+from desk.config import get_settings
 from desk.models.conversation import Conversation
 from desk.models.customer import Customer
 from desk.models.message import Message
 from desk.utils.redis_client import get_redis_manager
 
 logger = structlog.get_logger()
+
+
+def _extract_vault_file_ids(metadata: dict[str, Any] | None) -> list[str]:
+    """
+    Pull ``vault_file_ids`` out of a conversation/message metadata dict.
+
+    Returns a list of string file ids (empty when the key is absent/empty or the
+    metadata is None). Non-string ids are coerced to str so callers get a uniform
+    type to hand to ``VaultClient.delete_file``.
+    """
+    if not metadata:
+        return []
+    raw = metadata.get("vault_file_ids") or []
+    if not isinstance(raw, list | tuple):
+        return []
+    return [str(item) for item in raw if item is not None]
+
 
 # Placeholder values used by the anonymize strategy. Conversation/message
 # structure is preserved; only personally identifiable content is replaced.
@@ -92,6 +111,98 @@ class ComplianceService:
             resource_id=str(customer_id),
             details=details,
         )
+
+    # ------------------------------------------------------------------
+    # Cross-product erasure (V1.4 F-1 — Desk → Vault right to be forgotten)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _snapshot_vault_file_ids(conversations: list[Conversation]) -> list[str]:
+        """
+        Collect deduped ``vault_file_ids`` from already-loaded conversations.
+
+        Reads conversation-level metadata only (no extra DB queries), preserving
+        order. Used by ``delete_customer_data`` to snapshot the ids before the
+        local erasure wipes/deletes the metadata.
+        """
+        ordered: dict[str, None] = {}
+        for conv in conversations:
+            for file_id in _extract_vault_file_ids(conv.metadata_):
+                ordered.setdefault(file_id)
+        return list(ordered)
+
+    async def _collect_vault_file_ids(self, customer_id: UUID) -> list[str]:
+        """
+        Gather deduped ``vault_file_ids`` recorded across a customer's
+        conversation AND message metadata (order preserved).
+        """
+        conversations = await self._get_conversations(customer_id)
+        ordered: dict[str, None] = {}
+        for conv in conversations:
+            for file_id in _extract_vault_file_ids(conv.metadata_):
+                ordered.setdefault(file_id)
+            for msg in await self._get_messages(conv.id):
+                for file_id in _extract_vault_file_ids(msg.metadata_):
+                    ordered.setdefault(file_id)
+        return list(ordered)
+
+    async def _erase_vault_files(self, file_ids: list[str]) -> dict[str, int]:
+        """
+        Best-effort delete each file id from Vault and summarize the outcome.
+
+        ``VaultClient.delete_file`` never raises, but each call is additionally
+        guarded so a single bad id can't abort the rest. Returns
+        ``{"attempted", "erased", "failed"}``.
+        """
+        summary = {"attempted": len(file_ids), "erased": 0, "failed": 0}
+        if not file_ids:
+            return summary
+
+        client = get_vault_client()
+        for file_id in file_ids:
+            try:
+                erased = await client.delete_file(file_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort, keep going
+                logger.warning(
+                    "Vault file erasure raised (best-effort)",
+                    file_id=file_id,
+                    error=str(exc),
+                )
+                erased = False
+            if erased:
+                summary["erased"] += 1
+            else:
+                summary["failed"] += 1
+        return summary
+
+    async def erase_customer_vault_data(
+        self,
+        customer_id: UUID,
+        file_ids: list[str] | None = None,
+    ) -> dict[str, int]:
+        """
+        Best-effort erase a customer's associated Vault knowledge files.
+
+        Args:
+            customer_id: Target customer (used for logging / collection).
+            file_ids: Optional pre-collected Vault file ids. When omitted, the
+                ids are gathered from the customer's conversation/message
+                metadata; when there are none the call is a no-op.
+
+        Returns:
+            ``{"attempted", "erased", "failed"}`` — Vault being unreachable only
+            shows up as ``failed``; this method never raises.
+        """
+        if file_ids is None:
+            file_ids = await self._collect_vault_file_ids(customer_id)
+
+        summary = await self._erase_vault_files(file_ids)
+        logger.info(
+            "Customer Vault data erasure complete",
+            customer_id=str(customer_id),
+            **summary,
+        )
+        return summary
 
     # ------------------------------------------------------------------
     # Export (GDPR Article 20 — right to data portability)
@@ -217,6 +328,11 @@ class ComplianceService:
 
         conversations = await self._get_conversations(customer_id)
 
+        # Snapshot the customer's Vault file ids from conversation metadata
+        # BEFORE the local erasure wipes (anonymize) or deletes (hard) it, so the
+        # best-effort cross-product erasure below still knows what to delete.
+        vault_file_ids = self._snapshot_vault_file_ids(conversations)
+
         if mode == "anonymize":
             summary = await self._anonymize(customer, conversations)
         else:
@@ -230,6 +346,30 @@ class ComplianceService:
         )
         await self.db.commit()
 
+        # Cross-product erasure (V1.4 F-1): best-effort delete of the customer's
+        # associated Vault knowledge files, after the local deletion is committed.
+        # Gated by config (default on) and a no-op when there are no recorded ids.
+        # Any failure here is swallowed — it must never block the local erasure.
+        vault_summary = None
+        if get_settings().compliance_cross_product_erasure and vault_file_ids:
+            try:
+                vault_summary = await self.erase_customer_vault_data(
+                    customer_id, file_ids=vault_file_ids
+                )
+                await self._write_audit(
+                    action="gdpr.vault_erasure",
+                    customer_id=customer_id,
+                    actor_id=actor_id,
+                    details=vault_summary,
+                )
+                await self.db.commit()
+            except Exception as exc:  # noqa: BLE001 - best-effort, never block
+                logger.warning(
+                    "Cross-product Vault erasure failed (best-effort)",
+                    customer_id=str(customer_id),
+                    error=str(exc),
+                )
+
         # Best-effort cache cleanup — never blocks or fails the erasure.
         await self._cleanup_cache(customer_id)
 
@@ -241,7 +381,10 @@ class ComplianceService:
             **summary,
         )
 
-        return {"customer_id": str(customer_id), "mode": mode, **summary}
+        result: dict[str, Any] = {"customer_id": str(customer_id), "mode": mode, **summary}
+        if vault_summary is not None:
+            result["vault_erasure"] = vault_summary
+        return result
 
     async def _anonymize(
         self,

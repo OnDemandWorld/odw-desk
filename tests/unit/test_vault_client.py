@@ -198,3 +198,67 @@ class TestVaultClientHealthCheck:
 
         with _patch_async_client(response, mock_client):
             assert await client.health_check() is False
+
+
+class TestVaultClientDeleteFile:
+    """Tests for VaultClient.delete_file() (V1.4 F-1, best-effort)."""
+
+    @staticmethod
+    def _delete_response(status_code: int) -> MagicMock:
+        response = MagicMock()
+        response.status_code = status_code
+        return response
+
+    async def test_delete_success_returns_true(self):
+        client = _make_client()
+        response = self._delete_response(200)
+        mock_client = _mock_client_with(response)
+        mock_client.delete = AsyncMock(return_value=response)
+
+        with _patch_async_client(response, mock_client):
+            assert await client.delete_file("42") is True
+
+        # Hits DELETE {vault_url}/files/{id}
+        args, kwargs = mock_client.delete.call_args
+        assert args[0] == "http://localhost:8765/files/42"
+        # Dev default key -> no Authorization header (Vault has no auth)
+        assert "Authorization" not in kwargs["headers"]
+
+    async def test_delete_sends_auth_header_for_real_key(self):
+        client = _make_client(vault_api_key="real-secret-key")
+        response = self._delete_response(204)
+        mock_client = _mock_client_with(response)
+        mock_client.delete = AsyncMock(return_value=response)
+
+        with _patch_async_client(response, mock_client):
+            assert await client.delete_file(7) is True
+
+        _, kwargs = mock_client.delete.call_args
+        assert kwargs["headers"]["Authorization"] == "Bearer real-secret-key"
+
+    async def test_delete_404_returns_false(self):
+        client = _make_client()
+        response = self._delete_response(404)
+        mock_client = _mock_client_with(response)
+        mock_client.delete = AsyncMock(return_value=response)
+
+        with _patch_async_client(response, mock_client):
+            assert await client.delete_file("missing") is False
+
+    async def test_delete_http_error_returns_false(self):
+        client = _make_client()
+        response = self._delete_response(500)
+        mock_client = _mock_client_with(response)
+        mock_client.delete = AsyncMock(return_value=response)
+
+        with _patch_async_client(response, mock_client):
+            assert await client.delete_file("boom") is False
+
+    async def test_delete_transport_error_returns_false_without_raising(self):
+        client = _make_client()
+        response = MagicMock()
+        mock_client = _mock_client_with(response)
+        mock_client.delete = AsyncMock(side_effect=httpx.ConnectError("down"))
+
+        with _patch_async_client(response, mock_client):
+            assert await client.delete_file("boom") is False

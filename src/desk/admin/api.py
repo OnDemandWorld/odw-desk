@@ -4,12 +4,16 @@ ODW.ai Desk — Admin APIs (AGENT-003, AGENT-004)
 Admin setup wizard, configuration management, and compliance APIs.
 """
 
+import csv
+import io
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from fastapi.responses import Response
+from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from desk.compliance.service import VALID_DELETE_MODES, ComplianceService
@@ -17,6 +21,7 @@ from desk.config import get_settings
 from desk.dependencies import get_db
 from desk.models.ai_configuration import AIConfiguration
 from desk.models.audit_log import AuditLog
+from desk.security.rbac import require_role
 
 logger = structlog.get_logger()
 
@@ -281,6 +286,138 @@ async def get_audit_logs(
         "total": len(logs),
         "limit": limit,
         "offset": offset,
+    }
+
+
+# ----------------------------------------------------------------------------
+# Compliance audit report export (V1.4 F-3)
+# ----------------------------------------------------------------------------
+
+# Columns emitted for each audit record (JSON + CSV share this ordering).
+_AUDIT_REPORT_COLUMNS = [
+    "id",
+    "timestamp",
+    "event_type",
+    "actor_type",
+    "actor_id",
+    "resource_type",
+    "resource_id",
+    "action",
+    "details",
+    "ip_address",
+    "previous_hash",
+    "hash",
+]
+
+
+def build_audit_report_query(
+    start: datetime | None = None,
+    end: datetime | None = None,
+    actor: str | None = None,
+    action: str | None = None,
+    limit: int = 1000,
+):
+    """
+    Build the filtered audit-report query (P1).
+
+    Filters (all optional, combined with AND):
+    - ``start``/``end``: inclusive timestamp range (``AuditLog.timestamp``).
+    - ``actor``: exact match on ``actor_id`` (compared as text — actor ids are
+      logged as opaque strings such as ``"system"`` / ``"admin-1"``).
+    - ``action``: exact match on ``action``.
+
+    Results are newest-first and capped at ``limit``.
+    """
+    query = select(AuditLog)
+    if start is not None:
+        query = query.where(AuditLog.timestamp >= start)
+    if end is not None:
+        query = query.where(AuditLog.timestamp <= end)
+    if actor:
+        query = query.where(cast(AuditLog.actor_id, String) == actor)
+    if action:
+        query = query.where(AuditLog.action == action)
+    return query.order_by(AuditLog.timestamp.desc()).limit(limit)
+
+
+def _audit_record_dict(log: AuditLog) -> dict[str, Any]:
+    """Serialize an AuditLog row to a plain dict for JSON/CSV export."""
+    return {
+        "id": str(log.id),
+        "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+        "event_type": log.event_type,
+        "actor_type": log.actor_type,
+        "actor_id": str(log.actor_id) if log.actor_id else None,
+        "resource_type": log.resource_type,
+        "resource_id": str(log.resource_id),
+        "action": log.action,
+        "details": log.details,
+        "ip_address": log.ip_address,
+        "previous_hash": log.previous_hash,
+        "hash": log.hash,
+    }
+
+
+def _parse_report_timestamp(value: str, field: str) -> datetime:
+    """Parse an ISO-8601 query timestamp, tolerating a trailing 'Z'."""
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail=f"Invalid {field} timestamp; expected ISO-8601"
+        ) from exc
+
+
+@router.get("/compliance/report", dependencies=[Depends(require_role("admin"))])
+async def get_compliance_report(
+    format: str = Query("json", description="Output format: json (default) or csv"),
+    start: str = Query(None, description="Inclusive start timestamp (ISO-8601)"),
+    end: str = Query(None, description="Inclusive end timestamp (ISO-8601)"),
+    actor: str = Query(None, description="Filter by actor id"),
+    action: str = Query(None, description="Filter by action"),
+    limit: int = Query(1000, ge=1, le=10000),
+    db: AsyncSession = Depends(get_db),
+) -> Any:
+    """
+    Export compliance audit records (SOC2/GDPR evidence) as JSON or CSV.
+
+    Guarded by ``require_role('admin')``. Records are filtered by an optional
+    time range (``start``/``end``), ``actor``, and ``action``, newest-first.
+    CSV is produced with the stdlib ``csv`` module (no extra dependency).
+    """
+    if format not in ("json", "csv"):
+        raise HTTPException(status_code=422, detail="format must be 'json' or 'csv'")
+
+    start_dt = _parse_report_timestamp(start, "start") if start else None
+    end_dt = _parse_report_timestamp(end, "end") if end else None
+
+    query = build_audit_report_query(
+        start=start_dt, end=end_dt, actor=actor, action=action, limit=limit
+    )
+    result = await db.execute(query)
+    logs = result.scalars().all()
+    records = [_audit_record_dict(log) for log in logs]
+
+    if format == "csv":
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=_AUDIT_REPORT_COLUMNS)
+        writer.writeheader()
+        for record in records:
+            row = dict(record)
+            # Flatten the details dict to a JSON string for CSV cells.
+            row["details"] = "" if row["details"] is None else str(row["details"])
+            writer.writerow(row)
+        return Response(
+            content=buffer.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=compliance_report.csv"},
+        )
+
+    return {
+        "format": "json",
+        "total": len(records),
+        "filters": {"start": start, "end": end, "actor": actor, "action": action},
+        "records": records,
     }
 
 

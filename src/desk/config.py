@@ -184,6 +184,23 @@ class Settings(BaseSettings):
         default=365, ge=1, description="Conversation data retention period (days)"
     )
 
+    # Compliance (V1.4)
+    compliance_cross_product_erasure: bool = Field(
+        default=True,
+        description=(
+            "When deleting a customer, also best-effort erase their associated "
+            "Vault knowledge files (recorded as vault_file_ids in conversation "
+            "metadata). Vault failures never block the local deletion."
+        ),
+    )
+
+    # Web-chat (V1.4)
+    webchat_rate_limit_per_min: int = Field(
+        default=30,
+        ge=1,
+        description="Max inbound web-chat messages per visitor per minute (sliding window).",
+    )
+
     # License
     license_key: str = Field(default="free", description="Desk license key")
     license_grace_period_days: int = Field(

@@ -221,6 +221,44 @@ class VaultClient:
             logger.error("Vault health check failed", error=str(e))
             return False
 
+    async def delete_file(self, file_id: str | int) -> bool:
+        """
+        Best-effort deletion of a file from Vault (DELETE /files/{file_id}).
+
+        Added for the V1.4 cross-product GDPR erasure flow (F-1). This is purely
+        additive — the retrieval/health contract above is unchanged.
+
+        Never raises: any timeout, transport error, or non-2xx HTTP status
+        (including 404 — the file is already gone) returns False so callers can
+        treat erasure as best-effort and continue.
+
+        Args:
+            file_id: Vault file identifier.
+
+        Returns:
+            True when Vault acknowledged the deletion (2xx), False otherwise.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.delete(
+                    f"{self.vault_url}/files/{file_id}",
+                    headers=self._auth_headers(),
+                )
+            if 200 <= response.status_code < 300:
+                logger.info(
+                    "Vault file deleted", file_id=str(file_id), status_code=response.status_code
+                )
+                return True
+            logger.warning(
+                "Vault file deletion not acknowledged",
+                file_id=str(file_id),
+                status_code=response.status_code,
+            )
+            return False
+        except Exception as e:  # noqa: BLE001 - best-effort, never raise
+            logger.error("Vault file deletion failed", file_id=str(file_id), error=str(e))
+            return False
+
 
 # Global instance
 _vault_client: VaultClient | None = None
