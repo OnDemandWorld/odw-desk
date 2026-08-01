@@ -201,6 +201,24 @@ class Settings(BaseSettings):
         description="Max inbound web-chat messages per visitor per minute (sliding window).",
     )
 
+    # Email channel (V1.5 F-2)
+    # Disabled by default so development never requires a live SMTP server;
+    # outbound replies are stubbed until enabled + a host is configured.
+    email_enabled: bool = Field(
+        default=False,
+        description="Enable the Email channel (outbound SMTP). Default False (dev stub).",
+    )
+    email_smtp_host: str = Field(default="", description="Outbound SMTP server host")
+    email_smtp_port: int = Field(default=587, ge=1, le=65535, description="Outbound SMTP port")
+    email_smtp_user: str = Field(default="", description="SMTP authentication username")
+    email_smtp_password: str = Field(default="", description="SMTP authentication password")
+    email_use_tls: bool = Field(
+        default=True, description="Use STARTTLS when connecting to the SMTP server"
+    )
+    email_from: str = Field(
+        default="", description="Sender address used on outbound Email replies"
+    )
+
     # License
     license_key: str = Field(default="free", description="Desk license key")
     license_grace_period_days: int = Field(

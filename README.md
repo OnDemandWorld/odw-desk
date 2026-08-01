@@ -29,6 +29,11 @@ Unlike cloud-based solutions that send customer data to third-party APIs, Desk m
 ### 💬 Channel Support
 - **WhatsApp Business API**: Full support for Meta's official WhatsApp Business Platform
 - **Web-chat (V1.3)**: WebSocket browser chat (`WS /ws/chat/{visitor_id}`) sharing the same conversation/agent pipeline as WhatsApp
+- **Email (V1.5)**: RFC822 inbound parsing (`desk.channels.email.parse_email_message`) routed
+  through the same conversation/agent pipeline (`channel="email"`), with reply threading via
+  `In-Reply-To`/`References` (or sender+subject). Outbound replies go over SMTP
+  (`EmailChannel.send_reply`, injectable/mockable); disabled by default (`EMAIL_ENABLED=false`)
+  so development never requires a live mail server — sends are gracefully stubbed until configured.
 - **Extensible Architecture**: Plugin system ready for Telegram, Discord, Slack, Signal, and iMessage adapters
 - **Real-time Updates**: WebSocket-based live conversation monitoring for agents
 
@@ -217,6 +222,14 @@ REDIS_URL=redis://localhost:6379/0
 WHATSAPP_ACCESS_TOKEN=your_token
 WHATSAPP_PHONE_NUMBER_ID=your_phone_id
 WHATSAPP_WEBHOOK_VERIFY_TOKEN=your_verify_token
+
+# Email Channel (V1.5) — disabled by default; outbound SMTP is stubbed in dev
+EMAIL_ENABLED=false
+EMAIL_SMTP_HOST=smtp.example.com
+EMAIL_SMTP_PORT=587
+EMAIL_SMTP_USER=
+EMAIL_SMTP_PASSWORD=
+EMAIL_FROM=support@example.com
 
 # AI Models
 OLLAMA_ENDPOINT=http://localhost:11434

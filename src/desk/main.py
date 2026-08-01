@@ -30,6 +30,7 @@ from desk.channels.whatsapp_business import router as whatsapp_router
 from desk.config import get_settings
 from desk.db import get_engine
 from desk.events.redis_streams import RedisStreamsEventBus
+from desk.observability.tracing import TraceIdMiddleware
 from desk.security.api_auth import require_api_key
 from desk.security.rbac import require_role
 from desk.utils.redis_client import get_redis_manager
@@ -126,6 +127,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Distributed tracing (V1.5 F-3): bind/propagate X-Trace-Id per request.
+    # Added after CORS so it is the outermost middleware and wraps every route.
+    app.add_middleware(TraceIdMiddleware)
 
     # Optional API key guard for admin + agent inbox routes. When DESK_API_KEY is
     # unset the dependency is a no-op, so routes stay open (backward compatible).

@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 import structlog
 
+from desk.observability.tracing import get_current_trace_id
 from desk.utils.redis_client import Cache, get_redis_manager
 
 logger = structlog.get_logger()
@@ -95,10 +96,20 @@ class VaultClient:
         )
 
     def _auth_headers(self) -> dict[str, str]:
-        """Build request headers, only adding Authorization for a real key."""
+        """
+        Build request headers.
+
+        Only adds Authorization for a real key. Also forwards the current
+        ``X-Trace-Id`` best-effort (V1.5 F-3) so a single trace id correlates
+        Desk→Vault logs; when no trace is bound to the context nothing is sent.
+        This is additive — the retrieval/deletion contract is unchanged.
+        """
         headers = {"Content-Type": "application/json"}
         if self.vault_api_key and self.vault_api_key != _DEV_DEFAULT_API_KEY:
             headers["Authorization"] = f"Bearer {self.vault_api_key}"
+        trace_id = get_current_trace_id()
+        if trace_id:
+            headers["X-Trace-Id"] = trace_id
         return headers
 
     def _cache_key(self, collection_id: str, query: str, top_k: int) -> str:

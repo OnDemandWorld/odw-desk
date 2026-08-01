@@ -9,6 +9,7 @@ httpx.AsyncClient is mocked; Redis cache is stubbed so no live services are need
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import structlog
 
 from desk.ai.vault_client import RetrievedDocument, VaultClient
 
@@ -262,3 +263,50 @@ class TestVaultClientDeleteFile:
 
         with _patch_async_client(response, mock_client):
             assert await client.delete_file("boom") is False
+
+
+class TestVaultClientTracing:
+    """V1.5 F-3 (DT2) — outbound calls forward X-Trace-Id best-effort."""
+
+    async def test_retrieve_forwards_bound_trace_header(self):
+        client = _make_client()
+        response = _vault_response([_chunk(0.85)])
+        mock_client = _mock_client_with(response)
+
+        structlog.contextvars.bind_contextvars(trace_id="trace-retrieve-1")
+        try:
+            with _patch_async_client(response, mock_client):
+                await client.retrieve("hello")
+        finally:
+            structlog.contextvars.unbind_contextvars("trace_id")
+
+        _, kwargs = mock_client.post.call_args
+        assert kwargs["headers"]["X-Trace-Id"] == "trace-retrieve-1"
+
+    async def test_retrieve_omits_trace_header_when_unbound(self):
+        client = _make_client()
+        response = _vault_response([_chunk(0.85)])
+        mock_client = _mock_client_with(response)
+
+        with _patch_async_client(response, mock_client):
+            await client.retrieve("hello")
+
+        _, kwargs = mock_client.post.call_args
+        assert "X-Trace-Id" not in kwargs["headers"]
+
+    async def test_delete_forwards_bound_trace_header(self):
+        client = _make_client()
+        response = MagicMock()
+        response.status_code = 200
+        mock_client = _mock_client_with(response)
+        mock_client.delete = AsyncMock(return_value=response)
+
+        structlog.contextvars.bind_contextvars(trace_id="trace-delete-9")
+        try:
+            with _patch_async_client(response, mock_client):
+                assert await client.delete_file("42") is True
+        finally:
+            structlog.contextvars.unbind_contextvars("trace_id")
+
+        _, kwargs = mock_client.delete.call_args
+        assert kwargs["headers"]["X-Trace-Id"] == "trace-delete-9"
