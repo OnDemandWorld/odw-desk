@@ -135,7 +135,6 @@ def create_app() -> FastAPI:
     # Optional API key guard for admin + agent inbox routes. When DESK_API_KEY is
     # unset the dependency is a no-op, so routes stay open (backward compatible).
     # Health (/health) and webhooks (/api/v1/webhooks/*) are intentionally NOT guarded.
-    api_guard = [Depends(require_api_key)]
 
     # RBAC (F-RBAC-Desk): role guards layered on top of the API-key guard.
     # admin routes require admin; agent inbox routes require agent or above.
@@ -149,7 +148,10 @@ def create_app() -> FastAPI:
     app.include_router(websocket_router)
     app.include_router(webchat_router)
     app.include_router(admin_router, dependencies=admin_guard)
-    app.include_router(persona_policy_router, dependencies=api_guard)
+    # persona/policy management lives under /api/v1/admin/ and is admin-only;
+    # it was previously registered with api_guard (auth only), letting agents
+    # access it (found via role-based UAT). Guard it as admin.
+    app.include_router(persona_policy_router, dependencies=admin_guard)
 
     @app.get("/health", tags=["Health"])
     async def health_check() -> dict:
