@@ -80,6 +80,9 @@ Unlike cloud-based solutions that send customer data to third-party APIs, Desk m
 - **Kubernetes Native**: Helm charts with configurable values for scaling
 - **CI/CD Pipeline**: GitHub Actions workflow with lint, test, and build stages
 - **Observability**: 25+ Prometheus metrics across all system components
+- **Distributed Tracing (V1.5/V1.6)**: `X-Trace-Id` propagation (V1.5) plus a lightweight span
+  model (V1.6 F-2) — `desk.observability.tracing.start_span` builds a sampled span tree around the
+  AI pipeline and channel inbound, exported to the console (default) or best-effort OTLP/HTTP
 - **Graceful Degradation**: System continues operating when external services (LLM, Vault) are unavailable
 
 ## Architecture
@@ -249,6 +252,11 @@ VAULT_COLLECTION_ID=your_collection_id
 
 # Security
 SECRET_KEY=your_secret_key_min_32_chars
+
+# Distributed Tracing Spans (V1.6 F-2) — best-effort, backward-compatible defaults
+TRACE_SAMPLE_RATE=1.0            # fraction of traces sampled (1.0 = all, 0.0 = none)
+TRACE_EXPORTER=console           # console | otlp | none
+OTLP_ENDPOINT=                   # OTLP/HTTP endpoint used when TRACE_EXPORTER=otlp
 ```
 
 ## API Documentation
@@ -300,6 +308,19 @@ Web-chat channel (V1.3). Send plain-text frames as a visitor; each message is
 routed through the shared pipeline (channel `webchat`) and acknowledged with a
 `{"type": "routed", "conversation_id": ...}` envelope. Outbound replies are
 pushed back as `{"type": "reply", "content": ...}` frames.
+
+**Read receipts (V1.6 F-4).** Clients mark a message read by sending
+`{"type": "read", "message_id": "..."}` (the `message_id` is the channel message
+id, or the message UUID). The server sets the message's `read_at` timestamp
+(idempotently — an already-read message keeps its first `read_at`) and replies
+with `{"type": "read_ack", "message_id": ..., "read_at": ..., "status": "read"}`
+(`status` is `not_found` when the message does not exist). Messages with no read
+event keep `read_at = null` (unread), so existing clients are unaffected.
+
+**Rich-media persistence (V1.6 F-4).** Inbound `image`/`file` frames may carry
+`url`/`mime`/`name`/`size`; this metadata is now persisted on the message record
+(`metadata.media`) instead of living only in memory (V1.4), so sent images/files
+are queryable after the fact. Frames without media persist nothing extra.
 
 ## Development
 

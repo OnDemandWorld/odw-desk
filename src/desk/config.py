@@ -201,6 +201,24 @@ class Settings(BaseSettings):
         description="Max inbound web-chat messages per visitor per minute (sliding window).",
     )
 
+    # Observability — distributed tracing spans (V1.6 F-2)
+    # Best-effort span model layered on the V1.5 trace_id propagation. Defaults
+    # are backward compatible: sample everything, export to the console, no OTLP.
+    trace_sample_rate: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of traces sampled for span export (1.0 = all, 0.0 = none).",
+    )
+    trace_exporter: Literal["console", "otlp", "none"] = Field(
+        default="console",
+        description="Span exporter: console (structlog), otlp (best-effort HTTP), or none.",
+    )
+    otlp_endpoint: str = Field(
+        default="",
+        description="OTLP HTTP endpoint spans are POSTed to when trace_exporter=otlp.",
+    )
+
     # Email channel (V1.5 F-2)
     # Disabled by default so development never requires a live SMTP server;
     # outbound replies are stubbed until enabled + a host is configured.

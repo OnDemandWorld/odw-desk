@@ -56,18 +56,25 @@ class MessageRouter:
             channel_conversation_id=message.conversation_id,
         )
 
-        # Persist inbound message
+        # Persist inbound message. Rich-media metadata (V1.6 F-4, DC2) carried in
+        # ``message.metadata["media"]`` (image/file url/mime/name/size) is stored
+        # on the message record so it survives beyond the V1.4 in-memory handling.
+        persisted_metadata: dict = {
+            "channel": message.channel,
+            "timestamp": message.timestamp.isoformat() if message.timestamp else None,
+            "media_urls": message.media_urls,
+        }
+        media = message.metadata.get("media")
+        if media:
+            persisted_metadata["media"] = media
+
         await self.conversation_manager.add_message(
             conversation=conversation,
             sender_type="customer",
             sender_id=message.sender_identifier,
             content=message.content,
             channel_message_id=message.message_id,
-            metadata={
-                "channel": message.channel,
-                "timestamp": message.timestamp.isoformat() if message.timestamp else None,
-                "media_urls": message.media_urls,
-            },
+            metadata=persisted_metadata,
         )
 
         # Publish routing event to event bus for AI processing

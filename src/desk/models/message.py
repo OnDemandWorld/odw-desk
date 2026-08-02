@@ -108,6 +108,11 @@ class Message(UUIDPrimaryKeyMixin, Base):
         default=datetime.utcnow,
         comment="Message timestamp",
     )
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="When the message was marked read (read receipt, V1.6 F-4); null = unread",
+    )
 
     # Relationships
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")

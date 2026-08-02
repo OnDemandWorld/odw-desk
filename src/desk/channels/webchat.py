@@ -15,15 +15,19 @@ so a returning visitor reuses the same conversation.
 
 import json
 import uuid
+from datetime import datetime
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from sqlalchemy import select
 
 from desk.channels.rate_limit import get_webchat_rate_limiter
 from desk.compliance.engine import ComplianceEngine
 from desk.db import AsyncSessionLocal
 from desk.dependencies import get_event_bus
+from desk.models.message import Message
+from desk.observability.tracing import start_span
 from desk.router.message_router import MessageRouter
 from desk.schemas.channels import InboundMessage
 
@@ -35,6 +39,9 @@ WEBCHAT_CHANNEL = "webchat"
 
 # Inbound frame types treated as rich media (metadata only — no binary storage).
 MEDIA_FRAME_TYPES = ("image", "file")
+
+# Inbound frame type carrying a read receipt (V1.6 F-4, DC1).
+READ_FRAME_TYPE = "read"
 
 
 class WebChatManager:
@@ -145,8 +152,65 @@ async def route_webchat_message(
 
 async def route_inbound_message(inbound: InboundMessage, db: Any, event_bus: Any) -> dict[str, Any]:
     """Route an already-built inbound message through the shared MessageRouter."""
-    message_router = MessageRouter(db, event_bus)
-    return await message_router.route(inbound)
+    # V1.6 F-2 (DS3): best-effort span around channel inbound routing. Nested
+    # under the request's ai.process/trace tree; never changes routing behaviour.
+    with start_span(
+        "channel.webchat.inbound",
+        {"channel": inbound.channel, "message_id": inbound.message_id},
+    ):
+        message_router = MessageRouter(db, event_bus)
+        return await message_router.route(inbound)
+
+
+def parse_read_frame(raw: str) -> str | None:
+    """
+    Parse an inbound read-receipt frame, returning the referenced message id.
+
+    A read frame is a JSON object of the form ``{"type": "read", "message_id":
+    "…"}`` (V1.6 F-4, DC1). Returns the ``message_id`` for a well-formed read
+    frame, or None for anything else so the caller falls back to the regular
+    text/media path.
+    """
+    try:
+        frame = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(frame, dict):
+        return None
+    if str(frame.get("type") or "").lower() != READ_FRAME_TYPE:
+        return None
+    message_id = frame.get("message_id")
+    return str(message_id) if message_id else None
+
+
+async def mark_message_read(db: Any, message_id: str) -> Message | None:
+    """
+    Mark a message as read by setting ``read_at`` (V1.6 F-4, DC1).
+
+    Looks the message up by its channel message id first, then by primary key
+    (when ``message_id`` is a UUID). Idempotent: an already-read message keeps
+    its original ``read_at``. Best-effort — returns None when not found.
+    """
+    result = await db.execute(
+        select(Message).where(Message.channel_message_id == message_id)
+    )
+    message = result.scalar_one_or_none()
+
+    if message is None:
+        try:
+            message_uuid = uuid.UUID(message_id)
+        except (ValueError, AttributeError, TypeError):
+            return None
+        result = await db.execute(select(Message).where(Message.id == message_uuid))
+        message = result.scalar_one_or_none()
+
+    if message is None:
+        return None
+
+    if message.read_at is None:
+        message.read_at = datetime.utcnow()
+    await db.flush()
+    return message
 
 
 def parse_media_frame(raw: str) -> dict[str, Any] | None:
@@ -174,13 +238,17 @@ def parse_media_frame(raw: str) -> dict[str, Any] | None:
         return None
 
     url = frame.get("url")
-    return {
+    media: dict[str, Any] = {
         "type": frame_type,
         "url": str(url) if url is not None else None,
         "mime": frame.get("mime"),
         "name": frame.get("name"),
         "content": frame.get("content") or "",
     }
+    # Size is optional; only carried when the client supplies it (V1.6 F-4, DC2).
+    if frame.get("size") is not None:
+        media["size"] = frame.get("size")
+    return media
 
 
 def build_media_inbound_message(
@@ -288,6 +356,27 @@ async def webchat_endpoint(websocket: WebSocket, visitor_id: str) -> None:
                 break
 
             try:
+                # V1.6 F-4 (DC1): read-receipt frames mark a message read and are
+                # acknowledged inline; they never enter the routing pipeline.
+                read_message_id = parse_read_frame(text)
+                if read_message_id is not None:
+                    async with AsyncSessionLocal() as db:
+                        message = await mark_message_read(db, read_message_id)
+                        await db.commit()
+                    await websocket.send_json(
+                        {
+                            "type": "read_ack",
+                            "message_id": read_message_id,
+                            "read_at": (
+                                message.read_at.isoformat()
+                                if message is not None and message.read_at
+                                else None
+                            ),
+                            "status": "read" if message is not None else "not_found",
+                        }
+                    )
+                    continue
+
                 media = parse_media_frame(text)
                 async with AsyncSessionLocal() as db:
                     if media is not None:

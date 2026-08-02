@@ -18,6 +18,7 @@ from desk.ai.vault_client import RetrievedDocument, get_vault_client
 from desk.config import get_settings
 from desk.db import AsyncSessionLocal
 from desk.i18n.service import reply_language, t
+from desk.observability.tracing import start_span
 from desk.persona.integration import get_prompt_builder_with_persona
 from desk.policy.engine import PolicyEngine
 from desk.schemas.channels import OutboundMessage
@@ -84,129 +85,137 @@ class AIEngine:
         """
         logger.info("Processing message through AI pipeline", conversation_id=conversation_id)
 
-        # Detect the reply language from the inbound message (F-Desk-1). Defaults
-        # to English so detection failures keep the existing behaviour.
-        lang = reply_language(content)
+        # V1.6 F-2 (DS3): wrap the whole pipeline in a best-effort span so the
+        # request's span tree captures end-to-end AI processing time. The span
+        # never changes the response; sampling/export default to console/1.0.
+        with start_span(
+            "ai.process",
+            {"conversation_id": conversation_id, "channel": channel},
+        ) as span:
+            # Detect the reply language from the inbound message (F-Desk-1). Defaults
+            # to English so detection failures keep the existing behaviour.
+            lang = reply_language(content)
 
-        try:
-            # Step 1: PII Detection
-            pii_result: PIIResult = await self.pii_shield.analyze(content)
-            logger.info(
-                "PII detection complete",
-                pii_detected=pii_result.pii_detected,
-                routing_directive=pii_result.routing_directive.value,
-            )
-
-            # Step 1.5: Pre-generation Policy Check
-            async with AsyncSessionLocal() as db:
-                policy_engine = PolicyEngine(db)
-                policy_result = await policy_engine.run_pre_generation_hooks(content)
-
-                if policy_result["policy_decision"] == "block":
-                    logger.info("Message blocked by policy", triggers=policy_result["triggers"])
-                    return policy_result["redirect_response"] or t("policy_block_pre", lang)
-
-            # Step 2: Model Routing
-            routing_decision: RoutingDecision = await self.model_router.route(
-                pii_directive=pii_result.routing_directive,
-                text=content,
-                context_depth=len(conversation_history) if conversation_history else 0,
-            )
-            logger.info(
-                "Model routing complete",
-                target=routing_decision.target.value,
-                model=routing_decision.model_name,
-            )
-
-            # Step 3: Vault Retrieval (knowledge base)
-            knowledge_docs: list[RetrievedDocument] = []
             try:
-                if not pii_result.pii_detected or pii_result.routing_directive == RoutingDirective.REDACTED_FRONTIER_OK:
-                    # Only retrieve knowledge if safe to do so
-                    knowledge_docs = await self.vault_client.retrieve(
-                        query=pii_result.redacted_text if pii_result.pii_detected else content,
-                        top_k=5,
-                    )
-                    logger.info("Knowledge retrieval complete", documents=len(knowledge_docs))
-            except Exception as e:
-                logger.warning("Knowledge retrieval failed (continuing without)", error=str(e))
-                # Continue without knowledge
-
-            # Step 4: Build Prompt with Persona
-            async with AsyncSessionLocal() as db:
-                persona_prompt_builder = await get_prompt_builder_with_persona(db)
-                system_prompt, prompt = await persona_prompt_builder.build_prompt_with_persona(
-                    user_message=pii_result.redacted_text if pii_result.pii_detected else content,
-                    conversation_history=conversation_history,
-                    knowledge_context=[doc.to_dict() for doc in knowledge_docs],
-                )
-
-            # Step 5: LLM Inference
-            llm_request = LLMRequest(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                max_tokens=1024,
-                temperature=0.7,
-            )
-
-            # Select provider based on routing decision
-            provider = self._select_provider(routing_decision)
-            try:
-                llm_response = await provider.generate(llm_request)
+                # Step 1: PII Detection
+                pii_result: PIIResult = await self.pii_shield.analyze(content)
                 logger.info(
-                    "LLM inference complete",
-                    provider=llm_response.provider,
-                    model=llm_response.model,
-                    tokens=llm_response.tokens_used,
-                )
-            except Exception as e:
-                logger.error("LLM inference failed", error=str(e))
-                # Fall back to stub response
-                return t("fallback_reply", lang, snippet=content[:50])
-
-            # Step 5.5: Post-generation Policy Check
-            async with AsyncSessionLocal() as db:
-                policy_engine = PolicyEngine(db)
-                post_policy_result = await policy_engine.run_post_generation_hooks(
-                    llm_response.text,
-                    content,
+                    "PII detection complete",
+                    pii_detected=pii_result.pii_detected,
+                    routing_directive=pii_result.routing_directive.value,
                 )
 
-                if post_policy_result["action"] == "block":
-                    logger.warning("Response blocked by post-generation policy", violations=post_policy_result["violations"])
-                    return t("policy_block_post", lang)
+                # Step 1.5: Pre-generation Policy Check
+                async with AsyncSessionLocal() as db:
+                    policy_engine = PolicyEngine(db)
+                    policy_result = await policy_engine.run_pre_generation_hooks(content)
 
-            # Step 6: Confidence Scoring
-            confidence: ConfidenceScore = await self.confidence_scorer.score(
-                response_text=llm_response.text,
-                knowledge_documents=knowledge_docs,
-                model_metadata=llm_response.metadata,
-            )
+                    if policy_result["policy_decision"] == "block":
+                        logger.info("Message blocked by policy", triggers=policy_result["triggers"])
+                        return policy_result["redirect_response"] or t("policy_block_pre", lang)
 
-            logger.info(
-                "Confidence scoring complete",
-                score=confidence.score,
-                should_escalate=confidence.should_escalate,
-            )
+                # Step 2: Model Routing
+                routing_decision: RoutingDecision = await self.model_router.route(
+                    pii_directive=pii_result.routing_directive,
+                    text=content,
+                    context_depth=len(conversation_history) if conversation_history else 0,
+                )
+                logger.info(
+                    "Model routing complete",
+                    target=routing_decision.target.value,
+                    model=routing_decision.model_name,
+                )
 
-            # Step 7: Decision
-            if confidence.should_escalate:
-                # Escalate to human agent
-                logger.warning(
-                    "Low confidence, escalating to human",
+                # Step 3: Vault Retrieval (knowledge base)
+                knowledge_docs: list[RetrievedDocument] = []
+                try:
+                    if not pii_result.pii_detected or pii_result.routing_directive == RoutingDirective.REDACTED_FRONTIER_OK:
+                        # Only retrieve knowledge if safe to do so
+                        knowledge_docs = await self.vault_client.retrieve(
+                            query=pii_result.redacted_text if pii_result.pii_detected else content,
+                            top_k=5,
+                        )
+                        logger.info("Knowledge retrieval complete", documents=len(knowledge_docs))
+                except Exception as e:
+                    logger.warning("Knowledge retrieval failed (continuing without)", error=str(e))
+                    # Continue without knowledge
+
+                # Step 4: Build Prompt with Persona
+                async with AsyncSessionLocal() as db:
+                    persona_prompt_builder = await get_prompt_builder_with_persona(db)
+                    system_prompt, prompt = await persona_prompt_builder.build_prompt_with_persona(
+                        user_message=pii_result.redacted_text if pii_result.pii_detected else content,
+                        conversation_history=conversation_history,
+                        knowledge_context=[doc.to_dict() for doc in knowledge_docs],
+                    )
+
+                # Step 5: LLM Inference
+                llm_request = LLMRequest(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    max_tokens=1024,
+                    temperature=0.7,
+                )
+
+                # Select provider based on routing decision
+                provider = self._select_provider(routing_decision)
+                try:
+                    llm_response = await provider.generate(llm_request)
+                    logger.info(
+                        "LLM inference complete",
+                        provider=llm_response.provider,
+                        model=llm_response.model,
+                        tokens=llm_response.tokens_used,
+                    )
+                except Exception as e:
+                    logger.error("LLM inference failed", error=str(e))
+                    # Fall back to stub response
+                    return t("fallback_reply", lang, snippet=content[:50])
+
+                # Step 5.5: Post-generation Policy Check
+                async with AsyncSessionLocal() as db:
+                    policy_engine = PolicyEngine(db)
+                    post_policy_result = await policy_engine.run_post_generation_hooks(
+                        llm_response.text,
+                        content,
+                    )
+
+                    if post_policy_result["action"] == "block":
+                        logger.warning("Response blocked by post-generation policy", violations=post_policy_result["violations"])
+                        return t("policy_block_post", lang)
+
+                # Step 6: Confidence Scoring
+                confidence: ConfidenceScore = await self.confidence_scorer.score(
+                    response_text=llm_response.text,
+                    knowledge_documents=knowledge_docs,
+                    model_metadata=llm_response.metadata,
+                )
+
+                logger.info(
+                    "Confidence scoring complete",
                     score=confidence.score,
-                    reasoning=confidence.reasoning,
+                    should_escalate=confidence.should_escalate,
                 )
-                # Return a fallback message indicating escalation
-                return t("escalation_notice", lang)
 
-            # Return AI response
-            return llm_response.text
+                # Step 7: Decision
+                if confidence.should_escalate:
+                    # Escalate to human agent
+                    logger.warning(
+                        "Low confidence, escalating to human",
+                        score=confidence.score,
+                        reasoning=confidence.reasoning,
+                    )
+                    # Return a fallback message indicating escalation
+                    return t("escalation_notice", lang)
 
-        except Exception as e:
-            logger.error("AI pipeline failed", error=str(e), conversation_id=conversation_id)
-            # Return a safe fallback (stub response for testing)
-            return t("fallback_reply", lang, snippet=content[:50])
+                # Return AI response
+                return llm_response.text
+
+            except Exception as e:
+                span.set_attribute("error", str(e))
+                logger.error("AI pipeline failed", error=str(e), conversation_id=conversation_id)
+                # Return a safe fallback (stub response for testing)
+                return t("fallback_reply", lang, snippet=content[:50])
 
     def _select_provider(self, routing_decision: RoutingDecision) -> LLMProvider:
         """Select LLM provider based on routing decision."""
