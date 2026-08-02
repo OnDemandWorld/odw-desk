@@ -379,13 +379,23 @@ async def webchat_endpoint(websocket: WebSocket, visitor_id: str) -> None:
 
                 media = parse_media_frame(text)
                 async with AsyncSessionLocal() as db:
-                    if media is not None:
-                        inbound = build_media_inbound_message(visitor_id, media)
-                        result = await route_inbound_message(inbound, db, get_event_bus())
-                    else:
-                        result = await route_webchat_message(
-                            visitor_id, text, db, get_event_bus()
-                        )
+                    try:
+                        if media is not None:
+                            inbound = build_media_inbound_message(visitor_id, media)
+                            result = await route_inbound_message(inbound, db, get_event_bus())
+                        else:
+                            result = await route_webchat_message(
+                                visitor_id, text, db, get_event_bus()
+                            )
+                        # Persist the routed customer/conversation/message. The
+                        # raw AsyncSessionLocal() (unlike the get_db dependency)
+                        # does not auto-commit, so without this the inbound
+                        # message was rolled back and never reached the agent
+                        # inbox (found via conversation-lifecycle testing).
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        raise
                 await websocket.send_json({"type": "routed", **result})
             except Exception as exc:  # noqa: BLE001
                 logger.error("Web-chat routing failed", visitor_id=visitor_id, error=str(exc))

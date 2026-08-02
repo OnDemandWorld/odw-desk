@@ -105,8 +105,11 @@ class TestOutboundPush:
 class TestWebsocketEndpoint:
     def test_endpoint_connects_and_routes_inbound_text(self):
         """Full WS handshake: connected frame, then routed ack for inbound text."""
+        mock_db = MagicMock()
+        mock_db.commit = AsyncMock()
+        mock_db.rollback = AsyncMock()
         cm = MagicMock()
-        cm.__aenter__ = AsyncMock(return_value=MagicMock())
+        cm.__aenter__ = AsyncMock(return_value=mock_db)
         cm.__aexit__ = AsyncMock(return_value=False)
 
         with (
@@ -165,8 +168,11 @@ class TestWebsocketEndpoint:
 
     def test_endpoint_routes_inbound_media_frame(self):
         """W3 — a type=image JSON frame is routed with media metadata."""
+        mock_db = MagicMock()
+        mock_db.commit = AsyncMock()
+        mock_db.rollback = AsyncMock()
         cm = MagicMock()
-        cm.__aenter__ = AsyncMock(return_value=MagicMock())
+        cm.__aenter__ = AsyncMock(return_value=mock_db)
         cm.__aexit__ = AsyncMock(return_value=False)
         frame = json.dumps(
             {
