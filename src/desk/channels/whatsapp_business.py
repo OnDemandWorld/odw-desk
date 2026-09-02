@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from desk.channels.base import AdapterConfig, AdapterHealthStatus, ChannelAdapter
@@ -338,6 +338,13 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
                 metadata = value.get("metadata", {})
                 phone_number_id = metadata.get("phone_number_id", "")
 
+                # Meta ships the contact profile name alongside the messages;
+                # adopt it as the customer display name (Chatwoot-style).
+                contacts = value.get("contacts") or []
+                profile_name = (
+                    (contacts[0].get("profile") or {}).get("name") if contacts else None
+                )
+
                 for message_data in value.get("messages", []):
                     message_type = message_data.get("type", "text")
                     content = ""
@@ -386,6 +393,7 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
                         conversation_id=phone_number,  # Use phone number as conversation ID for WhatsApp
                         channel="whatsapp",
                         sender_identifier=phone_number,
+                        sender_name=profile_name,
                         sender_type="customer",
                         content=content,
                         media_urls=[],
@@ -421,11 +429,13 @@ async def whatsapp_verification(
     hub_mode: str | None = Query(None, alias="hub.mode"),
     hub_verify_token: str | None = Query(None, alias="hub.verify_token"),
     hub_challenge: str | None = Query(None, alias="hub.challenge"),
-) -> str:
+) -> PlainTextResponse:
     """
     WhatsApp webhook verification endpoint.
 
-    Meta sends a GET request to verify the webhook URL.
+    Meta sends a GET request to verify the webhook URL. Per the Cloud API
+    spec, the hub.challenge value must be echoed back as the raw plain-text
+    body (JSON-quoting it fails verification).
     """
     settings = get_settings()
     if hub_mode != "subscribe":
@@ -437,7 +447,7 @@ async def whatsapp_verification(
     if hub_challenge is None:
         raise HTTPException(status_code=400, detail="Missing hub.challenge")
 
-    return hub_challenge
+    return PlainTextResponse(content=hub_challenge)
 
 
 @router.post("/whatsapp")

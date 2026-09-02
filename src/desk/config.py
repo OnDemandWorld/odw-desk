@@ -178,6 +178,9 @@ class Settings(BaseSettings):
     sla_resolution_hours: int = Field(
         default=48, ge=1, description="SLA for resolution (hours)"
     )
+    sla_scan_interval_seconds: int = Field(
+        default=60, ge=5, description="SLA scanner interval (seconds)"
+    )
 
     # Data Retention
     data_retention_days: int = Field(

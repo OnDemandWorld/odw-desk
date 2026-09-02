@@ -136,10 +136,18 @@ class TestSLAEscalate:
         assert await service.escalate(conv.id, "again") is False
 
     async def test_escalate_skips_invalid_transition(self):
-        conv = _conversation(status="new")  # new -> escalated is invalid
+        conv = _conversation(status="resolved")  # resolved -> escalated is invalid
         service = SLAService(_FakeDB([conv]), policy=POLICY)
         assert await service.escalate(conv.id, "breach") is False
-        assert conv.status == ConversationStatus.NEW
+        assert conv.status == ConversationStatus.RESOLVED
+
+    async def test_escalate_from_new_on_breach(self):
+        # A never-answered conversation (no AI reply yet) must be escalatable
+        # when its first-response SLA breaches — NEW -> ESCALATED is valid.
+        conv = _conversation(status="new")
+        service = SLAService(_FakeDB([conv]), policy=POLICY)
+        assert await service.escalate(conv.id, "breach") is True
+        assert conv.status == ConversationStatus.ESCALATED
 
     async def test_escalate_missing_conversation_returns_false(self):
         service = SLAService(_FakeDB([]), policy=POLICY)

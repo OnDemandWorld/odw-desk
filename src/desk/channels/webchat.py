@@ -15,13 +15,15 @@ so a returning visitor reuses the same conversation.
 
 import json
 import uuid
-from datetime import datetime
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
+from desk.channels.base import AdapterConfig, AdapterHealthStatus, ChannelAdapter
 from desk.channels.rate_limit import get_webchat_rate_limiter
 from desk.compliance.engine import ComplianceEngine
 from desk.db import AsyncSessionLocal
@@ -29,7 +31,7 @@ from desk.dependencies import get_event_bus
 from desk.models.message import Message
 from desk.observability.tracing import start_span
 from desk.router.message_router import MessageRouter
-from desk.schemas.channels import InboundMessage
+from desk.schemas.channels import InboundMessage, OutboundMessage
 
 logger = structlog.get_logger()
 
@@ -112,6 +114,61 @@ class WebChatManager:
 
 # Global connection manager (mirrors desk.agents.websocket pattern).
 manager = WebChatManager()
+
+
+class WebChatAdapter(ChannelAdapter):
+    """
+    Outbound adapter delivering AI/agent replies to web-chat visitors.
+
+    Inbound traffic arrives directly on the ``/ws/chat/{visitor_id}``
+    endpoint, so this adapter only implements ``send`` — pushing the reply
+    over the visitor's live WebSocket — plus the bookkeeping the channel
+    manager expects. Registering it lets the OutboundDispatcher reach
+    web-chat visitors, which was previously a dead end.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            AdapterConfig(
+                adapter_id="webchat",
+                adapter_name="Web Chat",
+                channel_type="webchat",
+                enabled=True,
+            )
+        )
+
+    async def connect(self) -> None:
+        """Mark connected; sockets are managed per-visitor by the manager."""
+        self.update_health("healthy", connected=True)
+
+    async def disconnect(self) -> None:
+        self.update_health("unhealthy", connected=False)
+
+    async def receive(self) -> AsyncIterator[InboundMessage]:  # pragma: no cover
+        # Inbound web-chat frames are handled by the WS endpoint directly.
+        yield
+
+    async def send(self, message: OutboundMessage) -> dict[str, Any]:
+        """Push a reply to the visitor's live WebSocket."""
+        delivered = await manager.push_reply(
+            visitor_id=message.recipient_identifier,
+            content=message.content,
+            conversation_id=message.conversation_id,
+        )
+        self.health_status.messages_sent += 1
+        if not delivered:
+            # Visitor is offline; the reply stays persisted for later viewing.
+            self.health_status.last_error = "visitor not connected"
+            return {
+                "success": True,
+                "delivered": False,
+                "note": "visitor offline; reply persisted",
+            }
+        return {"success": True, "delivered": True}
+
+    async def health_check(self) -> AdapterHealthStatus:
+        self.health_status.connected = bool(manager.active_connections)
+        return self.health_status
 
 
 def build_inbound_message(visitor_id: str, text: str, message_id: str | None = None) -> InboundMessage:
@@ -208,7 +265,7 @@ async def mark_message_read(db: Any, message_id: str) -> Message | None:
         return None
 
     if message.read_at is None:
-        message.read_at = datetime.utcnow()
+        message.read_at = datetime.now(tz=UTC)
     await db.flush()
     return message
 

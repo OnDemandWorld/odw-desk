@@ -4,7 +4,7 @@ ODW.ai Desk — API Schemas
 Pydantic models for API request/response bodies.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Generic, Literal, TypeVar
 
 from pydantic import BaseModel, Field
@@ -21,7 +21,7 @@ class HealthResponse(BaseModel):
     version: str = Field(..., description="Application version")
     environment: str = Field(..., description="Deployment environment")
     timestamp: datetime = Field(
-        default_factory=datetime.utcnow, description="Health check timestamp"
+        default_factory=lambda: datetime.now(tz=UTC), description="Health check timestamp"
     )
 
 

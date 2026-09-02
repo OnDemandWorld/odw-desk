@@ -4,10 +4,10 @@ ODW.ai Desk — Channel Schemas
 Pydantic models for channel-specific messages and events.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class InboundMessage(BaseModel):
@@ -26,21 +26,26 @@ class InboundMessage(BaseModel):
     sender_identifier: str = Field(
         ..., description="Sender identifier (phone number, email, user ID)"
     )
+    sender_name: str | None = Field(
+        default=None,
+        description="Sender display name (WhatsApp profile name, email From display name)",
+    )
     sender_type: Literal["customer", "agent", "system"] = Field(
         default="customer", description="Sender type"
     )
     content: str = Field(..., description="Message text content")
     media_urls: list[str] = Field(default_factory=list, description="Media file URLs")
     metadata: dict = Field(default_factory=dict, description="Channel-specific metadata")
-    timestamp: datetime = Field(default_factory=datetime.utcnow, description="Message timestamp")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(tz=UTC), description="Message timestamp")
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "message_id": "wamid.abc123",
                 "conversation_id": "wa_thread_12345",
                 "channel": "whatsapp",
                 "sender_identifier": "+5511999887766",
+                "sender_name": "Carlos",
                 "sender_type": "customer",
                 "content": "Hi, I need help with my appointment",
                 "media_urls": [],
@@ -48,6 +53,7 @@ class InboundMessage(BaseModel):
                 "timestamp": "2026-06-24T10:00:00Z",
             }
         }
+    )
 
 
 class OutboundMessage(BaseModel):
@@ -68,8 +74,8 @@ class OutboundMessage(BaseModel):
     media_urls: list[str] = Field(default_factory=list, description="Media file URLs")
     metadata: dict = Field(default_factory=dict, description="Channel-specific metadata")
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "conversation_id": "wa_thread_12345",
                 "channel": "whatsapp",
@@ -79,6 +85,7 @@ class OutboundMessage(BaseModel):
                 "metadata": {},
             }
         }
+    )
 
 
 class DeliveryResult(BaseModel):
@@ -90,11 +97,11 @@ class DeliveryResult(BaseModel):
     )
     error: str | None = Field(default=None, description="Error message if delivery failed")
     delivered_at: datetime = Field(
-        default_factory=datetime.utcnow, description="Delivery timestamp"
+        default_factory=lambda: datetime.now(tz=UTC), description="Delivery timestamp"
     )
 
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "success": True,
                 "channel_message_id": "wamid.xyz789",
@@ -102,6 +109,7 @@ class DeliveryResult(BaseModel):
                 "delivered_at": "2026-06-24T10:01:00Z",
             }
         }
+    )
 
 
 class WebChatSession(BaseModel):
@@ -112,7 +120,7 @@ class WebChatSession(BaseModel):
         default=None, description="Customer identifier (if authenticated)"
     )
     metadata: dict = Field(default_factory=dict, description="Session metadata")
-    created_at: datetime = Field(default_factory=datetime.utcnow, description="Session creation time")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(tz=UTC), description="Session creation time")
 
 
 class EmailMessage(BaseModel):
@@ -126,5 +134,5 @@ class EmailMessage(BaseModel):
     body_html: str = Field(default="", description="HTML body")
     attachments: list[str] = Field(default_factory=list, description="Attachment file paths")
     received_at: datetime = Field(
-        default_factory=datetime.utcnow, description="Email received timestamp"
+        default_factory=lambda: datetime.now(tz=UTC), description="Email received timestamp"
     )

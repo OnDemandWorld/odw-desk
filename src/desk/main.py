@@ -18,21 +18,27 @@ from sqlalchemy import text
 from desk.admin.api import router as admin_router
 from desk.admin.persona_policy_api import router as persona_policy_router
 from desk.agents.inbox_api import router as agent_router
+from desk.agents.reports_api import router as reports_router
 from desk.agents.websocket import router as websocket_router
 from desk.ai.engine import AIEngine
 from desk.channels.base import AdapterConfig
+from desk.channels.email import EmailChannelAdapter
+from desk.channels.email import router as email_router
 from desk.channels.manager import ChannelAdapterManager
 from desk.channels.mock import MockChannelAdapter
 from desk.channels.outbound import OutboundDispatcher
+from desk.channels.webchat import WebChatAdapter
 from desk.channels.webchat import router as webchat_router
 from desk.channels.whatsapp_business import get_adapter as get_whatsapp_adapter
 from desk.channels.whatsapp_business import router as whatsapp_router
 from desk.config import get_settings
-from desk.db import get_engine
+from desk.db import AsyncSessionLocal, get_engine
 from desk.events.redis_streams import RedisStreamsEventBus
 from desk.observability.tracing import TraceIdMiddleware
 from desk.security.api_auth import require_api_key
 from desk.security.rbac import require_role
+from desk.sla.checker import scan_due_conversations
+from desk.surveys.csat_api import router as csat_router
 from desk.utils.redis_client import get_redis_manager
 from desk.workers.message_processor import MessageProcessor
 
@@ -79,25 +85,57 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         channel_manager.register(whatsapp_adapter)
         logger.info("WhatsApp Business adapter registered")
 
+    # Register web-chat outbound adapter so the dispatcher can push AI/agent
+    # replies to visitors over their live WebSocket (previously unreachable).
+    channel_manager.register(WebChatAdapter())
+    logger.info("Web-chat adapter registered")
+
+    # Register email outbound adapter (SMTP replies; stubbed when SMTP is not
+    # configured) so the dispatcher can reach email customers.
+    channel_manager.register(EmailChannelAdapter())
+    logger.info("Email adapter registered")
+
     await channel_manager.start_all()
 
     # Start message processor worker in the background
     outbound_dispatcher = OutboundDispatcher(channel_manager)
+    app.state.outbound_dispatcher = outbound_dispatcher
     ai_engine = AIEngine()
     processor = MessageProcessor(event_bus, outbound_dispatcher, ai_engine)
     processor_task = asyncio.create_task(processor.run(), name="message-processor")
+
+    # Periodic SLA enforcement (V1.1 shipped the checker but nothing ever
+    # invoked it, so the SLA policy was decorative). Escalations are applied
+    # via the conversation manager and broadcast to connected agents.
+    async def sla_scanner_loop() -> None:
+        while True:
+            try:
+                async with AsyncSessionLocal() as session:
+                    summary = await scan_due_conversations(session)
+                    await session.commit()
+                if summary.get("breached"):
+                    logger.info("SLA scan found breaches", **summary)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.error("SLA scan failed", error=str(exc))
+            await asyncio.sleep(settings.sla_scan_interval_seconds)
+
+    sla_task = asyncio.create_task(sla_scanner_loop(), name="sla-scanner")
 
     logger.info("Redis, event bus, channel adapter manager, and message processor initialized")
 
     yield
 
     logger.info("Shutting down ODW.ai Desk")
-    # Cancel message processor worker
-    processor_task.cancel()
-    try:
-        await processor_task
-    except asyncio.CancelledError:
-        logger.info("Message processor worker cancelled")
+    # Cancel SLA scanner and message processor workers
+    for task in (sla_task, processor_task):
+        task.cancel()
+    for task in (sla_task, processor_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            logger.info("Background worker cancelled", name=task.get_name())
 
     # Graceful shutdown of all services
     await channel_manager.stop_all()
@@ -144,9 +182,15 @@ def create_app() -> FastAPI:
 
     # Include routers (CORE-001, AGENT-001, etc.)
     app.include_router(whatsapp_router)
+    app.include_router(email_router)
     app.include_router(agent_router, dependencies=agent_guard)
+    # Dashboard aggregates (Chatwoot-style overview + AI deflection), agent-accessible.
+    app.include_router(reports_router, dependencies=agent_guard)
     app.include_router(websocket_router)
     app.include_router(webchat_router)
+    # Public CSAT survey endpoints: conversation UUID is the capability token
+    # (same model as Chatwoot's CSAT survey links), so no API-key guard here.
+    app.include_router(csat_router)
     app.include_router(admin_router, dependencies=admin_guard)
     # persona/policy management lives under /api/v1/admin/ and is admin-only;
     # it was previously registered with api_guard (auth only), letting agents

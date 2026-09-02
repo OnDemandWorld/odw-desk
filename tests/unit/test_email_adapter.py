@@ -63,6 +63,7 @@ class TestParseEmailMessage:
     def test_parses_from_subject_body(self):
         parsed = parse_email_message(RAW_NEW_EMAIL)
         assert parsed.from_address == "carlos@example.com"
+        assert parsed.from_display_name == "Carlos Rivera"
         assert parsed.subject == "Help with my order"
         assert parsed.body == "Hello, where is my order?"
 

@@ -7,7 +7,7 @@ handles data export/deletion requests (GDPR), and maintains tamper-evident audit
 
 import hashlib
 import json
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -81,7 +81,7 @@ class ComplianceEngine:
             "details": details or {},
             "ip_address": ip_address,
             "previous_hash": previous_hash,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(tz=UTC).isoformat(),
         }
 
         # Calculate hash
@@ -181,7 +181,7 @@ class ComplianceEngine:
             Summary of deleted data
         """
         retention_days = self.settings.data_retention_days
-        cutoff_date = datetime.utcnow() - timedelta(days=retention_days)
+        cutoff_date = datetime.now(tz=UTC) - timedelta(days=retention_days)
 
         # Find conversations older than retention period
         query = select(Conversation).where(Conversation.updated_at < cutoff_date)

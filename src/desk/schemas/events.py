@@ -4,7 +4,7 @@ ODW.ai Desk — Event Schemas
 Pydantic models for event bus payloads.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -18,7 +18,7 @@ class InboundMessageEvent(BaseModel):
     event_type: Literal["inbound.message"] = "inbound.message"
     message: InboundMessage = Field(..., description="Inbound message data")
     received_at: datetime = Field(
-        default_factory=datetime.utcnow, description="Event timestamp"
+        default_factory=lambda: datetime.now(tz=UTC), description="Event timestamp"
     )
 
 
@@ -32,7 +32,7 @@ class OutboundMessageEvent(BaseModel):
         default=None, ge=0.0, le=1.0, description="AI confidence score (if AI-generated)"
     )
     prepared_at: datetime = Field(
-        default_factory=datetime.utcnow, description="Event timestamp"
+        default_factory=lambda: datetime.now(tz=UTC), description="Event timestamp"
     )
 
 
@@ -50,7 +50,7 @@ class ConversationStateEvent(BaseModel):
     new_state: str = Field(..., description="New state")
     reason: str | None = Field(default=None, description="Reason for state change")
     changed_at: datetime = Field(
-        default_factory=datetime.utcnow, description="Event timestamp"
+        default_factory=lambda: datetime.now(tz=UTC), description="Event timestamp"
     )
 
 
@@ -69,7 +69,7 @@ class AIDecisionEvent(BaseModel):
         default_factory=dict, description="Model routing decision details"
     )
     decided_at: datetime = Field(
-        default_factory=datetime.utcnow, description="Event timestamp"
+        default_factory=lambda: datetime.now(tz=UTC), description="Event timestamp"
     )
 
 
@@ -83,7 +83,7 @@ class SLABreachEvent(BaseModel):
     )
     due_at: datetime = Field(..., description="When SLA was due")
     breached_at: datetime = Field(
-        default_factory=datetime.utcnow, description="When breach was detected"
+        default_factory=lambda: datetime.now(tz=UTC), description="When breach was detected"
     )
 
 
@@ -100,5 +100,5 @@ class AgentActionEvent(BaseModel):
     agent_id: str = Field(..., description="Agent ID")
     action_details: dict = Field(default_factory=dict, description="Action-specific details")
     performed_at: datetime = Field(
-        default_factory=datetime.utcnow, description="Event timestamp"
+        default_factory=lambda: datetime.now(tz=UTC), description="Event timestamp"
     )

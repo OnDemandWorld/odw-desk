@@ -33,7 +33,8 @@ class CustomerResolver:
         Args:
             channel: Channel type (whatsapp, webchat, email, etc.)
             identifier: Channel-specific identifier
-            display_name: Optional display name for new customers
+            display_name: Display name — set on creation and used to fill in a
+                missing name on an existing customer (never overwrites)
 
         Returns:
             Existing or new Customer entity
@@ -54,6 +55,11 @@ class CustomerResolver:
             )
             self.db.add(customer)
             await self.db.flush()
+        elif display_name and not (customer.display_name or "").strip():
+            # Contact enrichment (Chatwoot-style): adopt the channel profile
+            # name (e.g. WhatsApp contact) when the customer has none yet;
+            # never overwrite a name an agent has already set.
+            customer.display_name = display_name
 
         return customer
 

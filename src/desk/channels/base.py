@@ -6,7 +6,7 @@ Abstract base class and types for all channel adapters.
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -127,4 +127,4 @@ class ChannelAdapter(ABC):
         if last_error:
             self.health_status.last_error = last_error
         if connected:
-            self.health_status.last_connected_at = datetime.utcnow()
+            self.health_status.last_connected_at = datetime.now(tz=UTC)

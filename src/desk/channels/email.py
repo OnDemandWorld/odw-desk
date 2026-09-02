@@ -16,25 +16,37 @@ conversation) or, failing that, from ``sender + subject`` (so a fresh top-level
 mail starts a new conversation).
 """
 
+import asyncio
 import email
 import hashlib
 import smtplib
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from email.mime.text import MIMEText
 from email.utils import make_msgid, parseaddr
+from typing import Any
 
 import structlog
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from desk.channels.base import AdapterConfig, AdapterHealthStatus, ChannelAdapter
 from desk.config import Settings, get_settings
-from desk.observability.tracing import get_current_trace_id
+from desk.dependencies import get_db, get_event_bus
+from desk.observability.metrics import MESSAGES_RECEIVED
+from desk.observability.tracing import get_current_trace_id, start_span
 from desk.router.message_router import MessageRouter
-from desk.schemas.channels import InboundMessage
+from desk.schemas.channels import InboundMessage, OutboundMessage
 
 logger = structlog.get_logger()
 
 EMAIL_CHANNEL = "email"
+
+# Inbound webhook relay (Mailgun routes / SendGrid inbound parse / CloudMailin
+# style). Kept under the same unguarded webhook prefix as WhatsApp.
+router = APIRouter(prefix="/api/v1/webhooks", tags=["Email"])
 
 
 @dataclass
@@ -48,6 +60,7 @@ class InboundEmail:
     in_reply_to: str = ""
     references: list[str] = field(default_factory=list)
     to_address: str = ""
+    from_display_name: str = ""
 
 
 def _normalize_message_id(value: str | None) -> str:
@@ -74,7 +87,9 @@ def parse_email_message(raw: str | bytes) -> InboundEmail:
     else:
         msg = email.message_from_string(raw, policy=email.policy.default)
 
-    from_address = parseaddr(msg.get("From") or "")[1] or (msg.get("From") or "").strip()
+    from_header = msg.get("From") or ""
+    from_display_name, from_addr = parseaddr(from_header)
+    from_address = from_addr or from_header.strip()
 
     body_part = msg.get_body(preferencelist=("plain",)) or msg.get_body(preferencelist=("html",))
     if body_part is not None:
@@ -89,6 +104,7 @@ def parse_email_message(raw: str | bytes) -> InboundEmail:
     return InboundEmail(
         from_address=from_address,
         to_address=(msg.get("To") or "").strip(),
+        from_display_name=(from_display_name or "").strip(),
         subject=(msg.get("Subject") or "").strip(),
         body=body,
         message_id=_normalize_message_id(msg.get("Message-ID")),
@@ -141,6 +157,7 @@ class EmailChannel:
             conversation_id=compute_thread_id(msg),
             channel=EMAIL_CHANNEL,
             sender_identifier=msg.from_address,
+            sender_name=msg.from_display_name or None,
             sender_type="customer",
             content=msg.body,
             media_urls=[],
@@ -259,9 +276,105 @@ def get_email_channel() -> EmailChannel:
     return _email_channel
 
 
+class EmailChannelAdapter(ChannelAdapter):
+    """
+    Outbound adapter delivering AI/agent replies to customers over SMTP.
+
+    Wraps :meth:`EmailChannel.send_reply`; SMTP is blocking, so the send is
+    offloaded to a worker thread via :func:`asyncio.to_thread`. Inbound mail
+    arrives via the ``POST /api/v1/webhooks/email`` relay endpoint, so this
+    adapter only implements ``send`` plus the bookkeeping the channel
+    manager expects. Registering it lets the OutboundDispatcher reach email
+    customers, which was previously a dead end.
+    """
+
+    def __init__(self, email_channel: EmailChannel | None = None) -> None:
+        super().__init__(
+            AdapterConfig(
+                adapter_id="email",
+                adapter_name="Email",
+                channel_type=EMAIL_CHANNEL,
+                enabled=True,
+            )
+        )
+        self.email_channel = email_channel or get_email_channel()
+
+    async def connect(self) -> None:
+        """Mark connected; SMTP connections are opened per send."""
+        self.update_health("healthy", connected=True)
+
+    async def disconnect(self) -> None:
+        self.update_health("unhealthy", connected=False)
+
+    async def receive(self) -> AsyncIterator[InboundMessage]:  # pragma: no cover
+        # Inbound mail is handled by the webhook relay endpoint.
+        yield
+
+    async def send(self, message: OutboundMessage) -> dict[str, Any]:
+        """Deliver a reply over SMTP (thread-offloaded; never raises)."""
+        subject = (message.metadata or {}).get("subject") or "Re: your inquiry"
+        result = await asyncio.to_thread(
+            self.email_channel.send_reply,
+            message.recipient_identifier,
+            subject,
+            message.content,
+        )
+        self.health_status.messages_sent += 1
+        if not result.get("success"):
+            self.health_status.last_error = str(result.get("error") or "send failed")
+        return result
+
+    async def health_check(self) -> AdapterHealthStatus:
+        return self.health_status
+
+
+@router.post("/email")
+async def email_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """
+    Email inbound relay webhook.
+
+    Accepts either a raw RFC822 message body (``message/rfc822`` /
+    ``text/plain``) or a JSON envelope ``{"raw": "<rfc822>"}`` — the shapes
+    inbound-relay services (Mailgun routes, SendGrid inbound parse, CloudMailin)
+    can be configured to POST. The raw mail is parsed, threaded onto a
+    conversation via ``References``/``In-Reply-To``, and routed through the
+    shared MessageRouter exactly like the WhatsApp/Web-chat paths.
+    """
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("application/json"):
+        try:
+            payload = await request.json()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="JSON body must be an object")
+        raw: str | bytes = str(payload.get("raw") or payload.get("body") or "")
+    else:
+        raw = await request.body()
+
+    if not raw or not str(raw).strip():
+        raise HTTPException(status_code=400, detail="Empty email payload")
+
+    # Observability: count inbound mail received on this channel.
+    MESSAGES_RECEIVED.labels(channel=EMAIL_CHANNEL, status="received").inc()
+
+    channel = get_email_channel()
+    event_bus = get_event_bus()
+
+    # Best-effort span so inbound mail joins the request's trace tree.
+    with start_span("channel.email.inbound", {"channel": EMAIL_CHANNEL}):
+        result = await channel.route_inbound(raw, db, event_bus)
+
+    return JSONResponse(content={"status": "received", "routed": result})
+
+
 __all__ = [
     "EMAIL_CHANNEL",
     "EmailChannel",
+    "EmailChannelAdapter",
     "InboundEmail",
     "compute_thread_id",
     "get_email_channel",

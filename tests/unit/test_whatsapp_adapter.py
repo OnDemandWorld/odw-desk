@@ -68,6 +68,41 @@ class TestWhatsAppBusinessAdapter:
         messages = adapter.parse_inbound_message(payload)
         assert len(messages) == 0
 
+    def test_parse_extracts_contact_profile_name(self, adapter):
+        """Contact profile name is carried as sender_name (Chatwoot-style)."""
+        payload = {
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "metadata": {"phone_number_id": "12345"},
+                                "contacts": [
+                                    {"profile": {"name": "Alice Smoke"}, "wa_id": "+15559876501"}
+                                ],
+                                "messages": [
+                                    {
+                                        "id": "wamid.name1",
+                                        "from": "+15559876501",
+                                        "type": "text",
+                                        "text": {"body": "Hi"},
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+
+        messages = adapter.parse_inbound_message(payload)
+        assert messages[0].sender_name == "Alice Smoke"
+
+        # Without a contacts block the name stays None.
+        del payload["entry"][0]["changes"][0]["value"]["contacts"]
+        messages = adapter.parse_inbound_message(payload)
+        assert messages[0].sender_name is None
+
 
 class TestWhatsAppWebhookEndpoints:
     """Tests for FastAPI webhook endpoints."""
@@ -83,7 +118,10 @@ class TestWhatsAppWebhookEndpoints:
             },
         )
         assert response.status_code == 200
-        assert response.text == '"1234567890"'
+        # Meta requires the raw challenge echoed back as plain text
+        # (JSON-quoting it fails webhook verification).
+        assert response.text == "1234567890"
+        assert response.headers["content-type"].startswith("text/plain")
 
     def test_webhook_verification_invalid_token(self, client):
         """Test verification with invalid token."""

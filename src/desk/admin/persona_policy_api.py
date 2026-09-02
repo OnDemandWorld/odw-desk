@@ -4,11 +4,12 @@ ODW.ai Desk — Persona & Policy Admin APIs (PERSONA-002, POLICY-002)
 Admin UI endpoints for brand persona and response policy management.
 """
 
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from desk.dependencies import get_db
@@ -105,32 +106,52 @@ async def list_policies(db: AsyncSession = Depends(get_db)) -> list[dict[str, An
     return await engine.list_policies()
 
 
+class PolicyCreateRequest(BaseModel):
+    """Request body for creating a response policy."""
+
+    name: str = Field(..., description="Policy name")
+    trigger_type: Literal["keyword", "classifier", "llm_intent"] = Field(
+        ..., description="How the trigger is evaluated"
+    )
+    action: Literal[
+        "template", "redirect", "inject_context", "append_disclaimer", "block", "escalate"
+    ] = Field(..., description="Action taken when the trigger matches")
+    trigger_config: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Trigger configuration: keywords, patterns, topics, metadata",
+    )
+    action_payload: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Action-specific payload: redirect_message, severity, ...",
+    )
+    applies_to: Literal["pre", "post", "both"] = Field("pre", description="Pipeline phase")
+    priority: int = Field(100, description="Evaluation order (lower = higher priority)")
+    description: str | None = Field(None, description="Policy description")
+    restricted_topics: list[str] | None = Field(None, description="Restricted topic labels")
+
+
 @router.post("/policies")
 async def create_policy(
-    name: str = Query(..., description="Policy name"),
-    hook_type: str = Query(..., description="Hook type: pre_generation or post_generation"),
-    rule_type: str = Query(..., description="Rule type: keyword, regex, topic, custom"),
-    action_type: str = Query(..., description="Action type: allow, block, redirect, flag"),
-    priority: int = Query(0, description="Policy priority (higher = evaluated first)"),
-    description: str = Query(None, description="Policy description"),
+    request: PolicyCreateRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Create a new response policy."""
     engine = PolicyEngine(db)
-    # For MVP, use simple conditions
-    conditions = {"keywords": []}
-    action_config = {}
 
-    policy = await engine.create_policy(
-        name=name,
-        hook_type=hook_type,
-        rule_type=rule_type,
-        action_type=action_type,
-        conditions=conditions,
-        action_config=action_config,
-        priority=priority,
-        description=description,
-    )
+    try:
+        policy = await engine.create_policy(
+            name=request.name,
+            trigger_type=request.trigger_type,
+            action=request.action,
+            trigger_config=request.trigger_config,
+            action_payload=request.action_payload,
+            applies_to=request.applies_to,
+            priority=request.priority,
+            description=request.description,
+            restricted_topics=request.restricted_topics,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return {
         "success": True,
@@ -139,24 +160,50 @@ async def create_policy(
     }
 
 
+@router.post("/policies/{policy_id}/activate")
+async def activate_policy(
+    policy_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Activate a response policy."""
+    engine = PolicyEngine(db)
+    policy = await engine.set_policy_active(policy_id, True)
+    if policy is None:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    return {"success": True, "message": "Policy activated"}
+
+
+@router.post("/policies/{policy_id}/deactivate")
+async def deactivate_policy(
+    policy_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Deactivate a response policy."""
+    engine = PolicyEngine(db)
+    policy = await engine.set_policy_active(policy_id, False)
+    if policy is None:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    return {"success": True, "message": "Policy deactivated"}
+
+
 @router.post("/policies/test")
 async def test_policy(
-    hook_type: str = Query(..., description="Hook type to test"),
+    phase: str = Query(..., description="Pipeline phase to test: pre or post"),
     content: str = Query(..., description="Content to test against policies"),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Test content against active policies."""
     engine = PolicyEngine(db)
 
-    if hook_type == "pre_generation":
+    if phase == "pre":
         result = await engine.run_pre_generation_hooks(content)
-    elif hook_type == "post_generation":
+    elif phase == "post":
         result = await engine.run_post_generation_hooks(content, content)
     else:
-        raise HTTPException(status_code=400, detail="Invalid hook_type")
+        raise HTTPException(status_code=400, detail="Invalid phase; use 'pre' or 'post'")
 
     return {
-        "hook_type": hook_type,
+        "phase": phase,
         "content": content,
         "result": result,
     }

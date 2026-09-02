@@ -4,7 +4,7 @@ ODW.ai Desk — Conversation Manager
 Manages conversation state, persists messages, and enforces SLA timers.
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
@@ -117,7 +117,7 @@ class ConversationManager:
             content=content,
             channel_message_id=channel_message_id,
             metadata=metadata or {},
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(tz=UTC),
         )
         self.db.add(message)
 
@@ -172,7 +172,7 @@ class ConversationManager:
         """Set first-response SLA if not already set."""
         if conversation.sla_first_response_due is None:
             # Use default 10 minutes from config in real implementation
-            conversation.sla_first_response_due = datetime.utcnow() + timedelta(minutes=10)
+            conversation.sla_first_response_due = datetime.now(tz=UTC) + timedelta(minutes=10)
 
     async def _mark_resolution(self, conversation: Conversation) -> None:
         """Mark conversation as resolved and clear agent assignment."""

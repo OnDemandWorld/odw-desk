@@ -4,7 +4,7 @@ ODW.ai Desk — License State Model
 Tracks license validation and feature gates.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import DateTime, String
 from sqlalchemy.dialects.postgresql import JSONB
@@ -61,7 +61,7 @@ class LicenseState(UUIDPrimaryKeyMixin, Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=lambda: datetime.now(tz=UTC),
         comment="Creation timestamp",
     )
 

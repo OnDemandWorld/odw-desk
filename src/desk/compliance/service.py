@@ -15,7 +15,7 @@ Every operation writes a tamper-evident audit record by reusing the existing
 (DB1 — existing audit table/model reused, no new table introduced).
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -288,7 +288,7 @@ class ComplianceService:
             "profile": profile,
             "conversations": conversation_payload,
             "conversation_count": len(conversations),
-            "exported_at": datetime.utcnow().isoformat(),
+            "exported_at": datetime.now(tz=UTC).isoformat(),
         }
 
     # ------------------------------------------------------------------

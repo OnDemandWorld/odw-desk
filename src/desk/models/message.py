@@ -4,7 +4,7 @@ ODW.ai Desk — Message Model
 Represents a message in a conversation.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -105,7 +105,7 @@ class Message(UUIDPrimaryKeyMixin, Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=lambda: datetime.now(tz=UTC),
         comment="Message timestamp",
     )
     read_at: Mapped[datetime | None] = mapped_column(

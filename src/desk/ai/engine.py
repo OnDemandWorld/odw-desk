@@ -5,6 +5,8 @@ Full RAG pipeline: PII detection → model routing → Vault retrieval → LLM i
 """
 
 
+from dataclasses import dataclass
+
 import structlog
 
 from desk.ai.confidence_scorer import ConfidenceScore, ConfidenceScorer
@@ -16,14 +18,40 @@ from desk.ai.providers.ollama import OllamaProvider
 from desk.ai.providers.openai import OpenAIProvider
 from desk.ai.vault_client import RetrievedDocument, get_vault_client
 from desk.config import get_settings
+from desk.conversations.manager import ConversationManager
+from desk.conversations.state_machine import ConversationStatus
 from desk.db import AsyncSessionLocal
 from desk.i18n.service import reply_language, t
+from desk.observability.metrics import ESCALATIONS
 from desk.observability.tracing import start_span
 from desk.persona.integration import get_prompt_builder_with_persona
 from desk.policy.engine import PolicyEngine
 from desk.schemas.channels import OutboundMessage
 
 logger = structlog.get_logger()
+
+
+@dataclass
+class AIResult:
+    """Structured outcome of the AI pipeline for one inbound message."""
+
+    text: str
+    """Response text to deliver to the customer."""
+
+    model: str = "unknown"
+    """LLM model that produced the response ("stub" on fallback paths)."""
+
+    routing: str = "local"
+    """Model-routing target (local / frontier)."""
+
+    confidence: float = 0.0
+    """Confidence score assigned to the generated response."""
+
+    escalated: bool = False
+    """Whether the conversation was escalated to a human agent."""
+
+    blocked: bool = False
+    """Whether a policy hook blocked generation."""
 
 
 class AIEngine:
@@ -71,6 +99,28 @@ class AIEngine:
         conversation_history: list[dict[str, str]] | None = None,
     ) -> str:
         """
+        Process a customer message and return only the response text.
+
+        Backwards-compatible shortcut over :meth:`process_detailed`.
+        """
+        result = await self.process_detailed(
+            conversation_id=conversation_id,
+            content=content,
+            channel=channel,
+            recipient=recipient,
+            conversation_history=conversation_history,
+        )
+        return result.text
+
+    async def process_detailed(
+        self,
+        conversation_id: str,
+        content: str,
+        channel: str,
+        recipient: str,
+        conversation_history: list[dict[str, str]] | None = None,
+    ) -> AIResult:
+        """
         Process a customer message through the full AI pipeline.
 
         Args:
@@ -81,7 +131,8 @@ class AIEngine:
             conversation_history: Previous conversation messages
 
         Returns:
-            Generated response text
+            :class:`AIResult` with the response text plus model, routing and
+            confidence metadata, and whether the turn was escalated.
         """
         logger.info("Processing message through AI pipeline", conversation_id=conversation_id)
 
@@ -112,7 +163,10 @@ class AIEngine:
 
                     if policy_result["policy_decision"] == "block":
                         logger.info("Message blocked by policy", triggers=policy_result["triggers"])
-                        return policy_result["redirect_response"] or t("policy_block_pre", lang)
+                        return AIResult(
+                            text=policy_result["redirect_response"] or t("policy_block_pre", lang),
+                            blocked=True,
+                        )
 
                 # Step 2: Model Routing
                 routing_decision: RoutingDecision = await self.model_router.route(
@@ -169,8 +223,12 @@ class AIEngine:
                     )
                 except Exception as e:
                     logger.error("LLM inference failed", error=str(e))
-                    # Fall back to stub response
-                    return t("fallback_reply", lang, snippet=content[:50])
+                    # Fall back to a canned reply; metadata reflects the intended model.
+                    return AIResult(
+                        text=t("fallback_reply", lang, snippet=content[:50]),
+                        model=routing_decision.model_name,
+                        routing=routing_decision.target.value,
+                    )
 
                 # Step 5.5: Post-generation Policy Check
                 async with AsyncSessionLocal() as db:
@@ -182,7 +240,12 @@ class AIEngine:
 
                     if post_policy_result["action"] == "block":
                         logger.warning("Response blocked by post-generation policy", violations=post_policy_result["violations"])
-                        return t("policy_block_post", lang)
+                        return AIResult(
+                            text=t("policy_block_post", lang),
+                            model=llm_response.model,
+                            routing=routing_decision.target.value,
+                            blocked=True,
+                        )
 
                 # Step 6: Confidence Scoring
                 confidence: ConfidenceScore = await self.confidence_scorer.score(
@@ -205,17 +268,76 @@ class AIEngine:
                         score=confidence.score,
                         reasoning=confidence.reasoning,
                     )
-                    # Return a fallback message indicating escalation
-                    return t("escalation_notice", lang)
+                    # Flip the conversation to ESCALATED and notify agents so
+                    # the escalation is actionable, not just a notice text.
+                    await self._escalate_conversation(conversation_id, confidence)
+                    return AIResult(
+                        text=t("escalation_notice", lang),
+                        model=llm_response.model,
+                        routing=routing_decision.target.value,
+                        confidence=confidence.score,
+                        escalated=True,
+                    )
 
                 # Return AI response
-                return llm_response.text
+                return AIResult(
+                    text=llm_response.text,
+                    model=llm_response.model,
+                    routing=routing_decision.target.value,
+                    confidence=confidence.score,
+                )
 
             except Exception as e:
                 span.set_attribute("error", str(e))
                 logger.error("AI pipeline failed", error=str(e), conversation_id=conversation_id)
                 # Return a safe fallback (stub response for testing)
-                return t("fallback_reply", lang, snippet=content[:50])
+                return AIResult(text=t("fallback_reply", lang, snippet=content[:50]))
+
+    async def _escalate_conversation(
+        self,
+        conversation_id: str,
+        confidence: ConfidenceScore,
+    ) -> None:
+        """
+        Move the conversation to ESCALATED and notify connected agents.
+
+        Best-effort: a failure here must never block the escalation notice
+        from reaching the customer, so every step is guarded.
+        """
+        ESCALATIONS.labels(reason="low_confidence").inc()
+        try:
+            # Local import keeps the agents realtime layer out of the AI
+            # module's import graph at load time.
+            from desk.agents.websocket import broadcast_escalation
+
+            async with AsyncSessionLocal() as db:
+                manager = ConversationManager(db)
+                conversation = await manager.get_conversation_by_id(conversation_id)
+                if (
+                    conversation is not None
+                    and conversation.status != ConversationStatus.ESCALATED
+                ):
+                    await manager.update_status(
+                        conversation,
+                        ConversationStatus.ESCALATED,
+                        reason=f"AI confidence {confidence.score:.2f} below threshold",
+                    )
+                    await db.commit()
+
+            await broadcast_escalation(
+                str(conversation_id),
+                {
+                    "reason": "low_confidence",
+                    "confidence": confidence.score,
+                    "reasoning": confidence.reasoning,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Escalation side effects failed (best-effort)",
+                conversation_id=str(conversation_id),
+                error=str(exc),
+            )
 
     def _select_provider(self, routing_decision: RoutingDecision) -> LLMProvider:
         """Select LLM provider based on routing decision."""

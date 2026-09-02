@@ -5,8 +5,8 @@ Validates license keys, enforces feature gates between free and paid tiers,
 and manages grace periods.
 """
 
-from datetime import datetime, timedelta
-from enum import Enum
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Any
 
 import structlog
@@ -19,7 +19,7 @@ from desk.models.license_state import LicenseState
 logger = structlog.get_logger()
 
 
-class LicenseTier(str, Enum):
+class LicenseTier(StrEnum):
     """License tier levels."""
 
     FREE = "free"
@@ -27,7 +27,7 @@ class LicenseTier(str, Enum):
     ENTERPRISE = "enterprise"
 
 
-class FeatureGate(str, Enum):
+class FeatureGate(StrEnum):
     """Feature gate identifiers."""
 
     # Free tier features
@@ -112,8 +112,8 @@ class LicenseManager:
                 license_key=self.settings.license_key,
                 tier=LicenseTier.FREE.value,
                 is_valid=True,
-                activated_at=datetime.utcnow(),
-                expires_at=datetime.utcnow() + timedelta(days=36500),  # ~100 years
+                activated_at=datetime.now(tz=UTC),
+                expires_at=datetime.now(tz=UTC) + timedelta(days=36500),  # ~100 years
                 grace_period_days=self.settings.license_grace_period_days,
                 metadata_={"auto_generated": True},
             )
@@ -138,7 +138,7 @@ class LicenseManager:
 
         assert self._license_state is not None
 
-        now = datetime.utcnow()
+        now = datetime.now(tz=UTC)
 
         # Check if license is expired
         if self._license_state.expires_at and now > self._license_state.expires_at:
@@ -218,8 +218,8 @@ class LicenseManager:
         self._license_state.license_key = license_key
         self._license_state.tier = tier.value
         self._license_state.is_valid = True
-        self._license_state.activated_at = datetime.utcnow()
-        self._license_state.expires_at = datetime.utcnow() + timedelta(days=365)
+        self._license_state.activated_at = datetime.now(tz=UTC)
+        self._license_state.expires_at = datetime.now(tz=UTC) + timedelta(days=365)
 
         await self.db.commit()
 

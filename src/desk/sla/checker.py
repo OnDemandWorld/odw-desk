@@ -11,7 +11,9 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from desk.agents.websocket import broadcast_escalation
 from desk.models.conversation import Conversation
+from desk.observability.metrics import ESCALATIONS
 from desk.sla.service import ACTIVE_STATUSES, SLAService, SLAStatus
 
 logger = structlog.get_logger()
@@ -51,6 +53,18 @@ async def scan_due_conversations(
         )
         if await service.escalate(conversation.id, reason):
             escalated += 1
+            ESCALATIONS.labels(reason="sla_breach").inc()
+            # Notify all connected agents — breached conversations are
+            # typically unassigned, so subscription-scoped routing would
+            # miss them.
+            await broadcast_escalation(
+                str(conversation.id),
+                {
+                    "reason": "sla_breach",
+                    "breach": status.value,
+                    "detail": reason,
+                },
+            )
 
     logger.info(
         "SLA scan complete",

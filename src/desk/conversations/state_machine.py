@@ -24,6 +24,7 @@ class ConversationStateMachine:
 
     Valid transitions:
     - new → active (first AI response or agent assignment)
+    - new → escalated (SLA breach before any response)
     - active → pending (awaiting customer reply, 24h timeout)
     - active → escalated (AI confidence below threshold or explicit escalation)
     - escalated → active (agent takes over or hands back)
@@ -31,6 +32,7 @@ class ConversationStateMachine:
     - resolved → closed (retention period expires or manual close)
     - resolved → active (customer sends new message)
     - pending → active (customer replies within window)
+    - pending → escalated (SLA breach while awaiting customer reply)
     - pending → closed (24h window expires without reply)
     - new → closed (admin cleanup)
     """
@@ -38,6 +40,7 @@ class ConversationStateMachine:
     VALID_TRANSITIONS: dict[ConversationStatus, set[ConversationStatus]] = {
         ConversationStatus.NEW: {
             ConversationStatus.ACTIVE,
+            ConversationStatus.ESCALATED,
             ConversationStatus.RESOLVED,
             ConversationStatus.CLOSED,
         },
@@ -48,6 +51,7 @@ class ConversationStateMachine:
         },
         ConversationStatus.PENDING: {
             ConversationStatus.ACTIVE,
+            ConversationStatus.ESCALATED,
             ConversationStatus.CLOSED,
         },
         ConversationStatus.ESCALATED: {

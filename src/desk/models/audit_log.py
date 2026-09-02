@@ -4,7 +4,7 @@ ODW.ai Desk — Audit Log Model
 Tamper-evident audit log for compliance.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import DateTime, Index, String
@@ -28,7 +28,7 @@ class AuditLog(UUIDPrimaryKeyMixin, Base):
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        default=datetime.utcnow,
+        default=lambda: datetime.now(tz=UTC),
         comment="Event timestamp",
     )
     event_type: Mapped[str] = mapped_column(

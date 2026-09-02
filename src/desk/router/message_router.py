@@ -4,7 +4,7 @@ ODW.ai Desk — Message Router
 Routes inbound messages to the appropriate processing pipeline.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,7 +46,7 @@ class MessageRouter:
         customer = await self.customer_resolver.resolve_or_create(
             channel=message.channel,
             identifier=message.sender_identifier,
-            display_name=None,
+            display_name=message.sender_name,
         )
 
         # Get or create conversation
@@ -87,7 +87,7 @@ class MessageRouter:
                 "channel": message.channel,
                 "sender_identifier": message.sender_identifier,
                 "content": message.content,
-                "routed_at": datetime.utcnow().isoformat(),
+                "routed_at": datetime.now(tz=UTC).isoformat(),
             },
         )
 

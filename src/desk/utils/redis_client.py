@@ -39,7 +39,7 @@ class RedisConnectionManager:
     async def disconnect(self) -> None:
         """Close Redis connection pool."""
         if self._pool is not None:
-            await self._pool.close()
+            await self._pool.aclose()  # close() is deprecated since redis-py 5.0.1
             self._pool = None
 
     async def health_check(self) -> dict:
