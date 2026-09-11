@@ -5,6 +5,7 @@ Real-time updates for human agents via WebSocket connections.
 Broadcasts conversation events to connected agents.
 """
 
+import hmac
 import json
 from typing import Any
 from uuid import UUID
@@ -13,6 +14,7 @@ import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
+from desk.config import get_settings
 from desk.models.agent import Agent
 
 logger = structlog.get_logger()
@@ -24,36 +26,42 @@ class ConnectionManager:
     """
     Manages WebSocket connections for real-time agent updates.
 
-    Handles connection lifecycle, message broadcasting, and agent session tracking.
+    Handles connection lifecycle, message broadcasting, and agent session
+    tracking. An agent may hold several simultaneous connections (multiple
+    tabs/devices); each socket is tracked independently so closing one never
+    tears down another.
     """
 
-    def __init__(self):
-        self.active_connections: dict[UUID, WebSocket] = {}
+    def __init__(self) -> None:
+        self.active_connections: dict[UUID, set[WebSocket]] = {}
         self.agent_subscriptions: dict[UUID, set[str]] = {}  # agent_id -> set of conversation_ids
 
     async def connect(self, agent_id: UUID, websocket: WebSocket) -> None:
         """Accept and register a new WebSocket connection."""
         await websocket.accept()
-        self.active_connections[agent_id] = websocket
-        self.agent_subscriptions[agent_id] = set()
+        self.active_connections.setdefault(agent_id, set()).add(websocket)
+        self.agent_subscriptions.setdefault(agent_id, set())
         logger.info("Agent WebSocket connected", agent_id=str(agent_id))
 
-    def disconnect(self, agent_id: UUID) -> None:
-        """Remove a WebSocket connection."""
-        if agent_id in self.active_connections:
-            del self.active_connections[agent_id]
-        if agent_id in self.agent_subscriptions:
-            del self.agent_subscriptions[agent_id]
+    def disconnect(self, agent_id: UUID, websocket: WebSocket) -> None:
+        """Remove one specific WebSocket connection for an agent."""
+        sockets = self.active_connections.get(agent_id)
+        if sockets is not None:
+            sockets.discard(websocket)
+            if not sockets:
+                del self.active_connections[agent_id]
+                # Only drop subscriptions with the agent's last connection.
+                self.agent_subscriptions.pop(agent_id, None)
         logger.info("Agent WebSocket disconnected", agent_id=str(agent_id))
 
     async def send_to_agent(self, agent_id: UUID, message: dict[str, Any]) -> None:
-        """Send a message to a specific agent."""
-        if agent_id in self.active_connections:
+        """Send a message to every live connection of an agent."""
+        for websocket in list(self.active_connections.get(agent_id, ())):
             try:
-                await self.active_connections[agent_id].send_json(message)
+                await websocket.send_json(message)
             except Exception as e:
                 logger.error("Failed to send to agent", agent_id=str(agent_id), error=str(e))
-                self.disconnect(agent_id)
+                self.disconnect(agent_id, websocket)
 
     async def broadcast_to_agents(
         self,
@@ -100,8 +108,40 @@ class ConnectionManager:
 connection_manager = ConnectionManager()
 
 
+def _websocket_authenticated(websocket: WebSocket) -> bool:
+    """
+    Handshake authentication for the agent WebSocket.
+
+    Mirrors the REST API-key guard: when ``DESK_API_KEY`` is unset the
+    endpoint stays open (dev / backward compatible); when set, the client must
+    present the key via ``?token=``, ``X-API-Key``, or ``Authorization: Bearer``
+    (browsers cannot set custom WS headers, hence the query param).
+    """
+    expected = (get_settings().desk_api_key or "").strip()
+    if not expected:
+        return True
+
+    supplied = (
+        websocket.query_params.get("token")
+        or websocket.headers.get("x-api-key")
+        or None
+    )
+    if supplied is None:
+        auth = websocket.headers.get("authorization") or ""
+        supplied = auth[7:].strip() if auth.lower().startswith("bearer ") else None
+    if not supplied:
+        return False
+
+    try:
+        return hmac.compare_digest(
+            supplied.encode("utf-8"), expected.encode("utf-8")
+        )
+    except (UnicodeEncodeError, AttributeError):
+        return False
+
+
 @router.websocket("/ws/agents/{agent_id}")
-async def agent_websocket(websocket: WebSocket, agent_id: UUID):
+async def agent_websocket(websocket: WebSocket, agent_id: UUID) -> None:
     """
     WebSocket endpoint for real-time agent updates.
 
@@ -110,7 +150,15 @@ async def agent_websocket(websocket: WebSocket, agent_id: UUID):
     - Conversation state changes
     - Escalation events
     - SLA breaches
+
+    Authentication follows the REST API-key guard: when ``DESK_API_KEY`` is
+    configured the handshake must present it (`?token=` / `X-API-Key` /
+    `Authorization: Bearer`), otherwise the socket is closed with 4401.
     """
+    if not _websocket_authenticated(websocket):
+        await websocket.close(code=4401, reason="Unauthorized")
+        return
+
     # Verify agent exists
     from desk.db import AsyncSessionLocal
 
@@ -159,10 +207,10 @@ async def agent_websocket(websocket: WebSocket, agent_id: UUID):
                 await websocket.send_json({"type": "error", "message": "Invalid JSON"})
 
     except WebSocketDisconnect:
-        connection_manager.disconnect(agent_id)
+        connection_manager.disconnect(agent_id, websocket)
     except Exception as e:
         logger.error("WebSocket error", agent_id=str(agent_id), error=str(e))
-        connection_manager.disconnect(agent_id)
+        connection_manager.disconnect(agent_id, websocket)
 
 
 async def broadcast_new_message(

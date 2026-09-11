@@ -6,7 +6,7 @@ response composition, and takeover/handoff actions.
 """
 
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 import structlog
@@ -29,11 +29,16 @@ from desk.schemas.channels import OutboundMessage
 
 logger = structlog.get_logger()
 
+# Conversation statuses that count as open/active in the queue
+# (shared definition with the reports module).
+OPEN_STATUSES = ("new", "active", "pending", "escalated")
+
 router = APIRouter(prefix="/api/v1/agents", tags=["Agent Inbox"])
 
 
 @router.get("/conversations", response_model=list[dict])
 async def list_conversations(
+    response: Response,
     status: str | None = Query(None, description="Filter by status"),
     assigned_agent_id: UUID | None = Query(None, description="Filter by assigned agent"),
     unassigned: bool = Query(False, description="Only unassigned (open-queue) conversations"),
@@ -43,7 +48,6 @@ async def list_conversations(
     ),
     limit: int = Query(50, ge=1, le=200, description="Max results"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
-    response: Response = None,
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
     """
@@ -77,6 +81,7 @@ async def list_conversations(
             or_(
                 Customer.display_name.ilike(like),
                 Conversation.channel_conversation_id.ilike(like),
+                # SQL-level CAST of the JSONB identifiers to text for LIKE search.
                 cast(Customer.channel_identifiers, String).ilike(like),
             )
         )
@@ -109,7 +114,7 @@ async def list_conversations(
             )
             .group_by(Message.conversation_id)
         )
-        unread_by_conv = dict(unread_result.all())
+        unread_by_conv = {row[0]: row[1] for row in unread_result.all()}
 
         last_result = await db.execute(
             select(Message)
@@ -340,6 +345,9 @@ async def send_agent_response(
         request.app.state, "outbound_dispatcher", None
     )
     if dispatcher is not None and conversation.customer is not None:
+        # conversation.channel is a plain str from the DB; OutboundMessage
+        # declares a channel Literal, so carry it through an untyped local.
+        channel_value: Any = conversation.channel
         recipient = (conversation.customer.channel_identifiers or {}).get(
             conversation.channel
         )
@@ -347,7 +355,7 @@ async def send_agent_response(
             delivery = await dispatcher.dispatch(
                 OutboundMessage(
                     conversation_id=str(conversation.id),
-                    channel=conversation.channel,
+                    channel=channel_value,
                     recipient_identifier=recipient,
                     content=content,
                     metadata={"sender": "agent", "message_id": str(message.id)},
@@ -508,7 +516,7 @@ async def mark_conversation_read(
     return {
         "success": True,
         "conversation_id": str(conversation_id),
-        "marked_read": result.rowcount,
+        "marked_read": int(getattr(result, "rowcount", 0) or 0),
     }
 
 
@@ -576,6 +584,21 @@ async def list_agents(
     result = await db.execute(query)
     agents = result.scalars().all()
 
+    # Count open conversations with one grouped query. Accessing the lazy
+    # ``assigned_conversations`` relationship here would raise
+    # MissingGreenlet (async sessions cannot lazy-load).
+    active_by_agent: dict[UUID, int] = {}
+    if agents:
+        counts = await db.execute(
+            select(Conversation.assigned_agent_id, func.count())
+            .where(
+                Conversation.assigned_agent_id.in_([agent.id for agent in agents]),
+                Conversation.status.in_(OPEN_STATUSES),
+            )
+            .group_by(Conversation.assigned_agent_id)
+        )
+        active_by_agent = {row[0]: row[1] for row in counts.all()}
+
     return [
         {
             "id": str(agent.id),
@@ -583,7 +606,7 @@ async def list_agents(
             "email": agent.email,
             "role": agent.role,
             "is_online": agent.is_online,
-            "active_conversations": len(agent.assigned_conversations) if agent.assigned_conversations else 0,
+            "active_conversations": active_by_agent.get(agent.id, 0),
             "created_at": agent.created_at.isoformat() if agent.created_at else None,
         }
         for agent in agents

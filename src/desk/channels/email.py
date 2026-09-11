@@ -25,7 +25,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from email.mime.text import MIMEText
 from email.utils import make_msgid, parseaddr
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -42,7 +42,7 @@ from desk.schemas.channels import InboundMessage, OutboundMessage
 
 logger = structlog.get_logger()
 
-EMAIL_CHANNEL = "email"
+EMAIL_CHANNEL: Literal["email"] = "email"
 
 # Inbound webhook relay (Mailgun routes / SendGrid inbound parse / CloudMailin
 # style). Kept under the same unguarded webhook prefix as WhatsApp.
@@ -171,7 +171,7 @@ class EmailChannel:
             },
         )
 
-    async def route_inbound(self, raw: str | bytes, db, event_bus) -> dict:
+    async def route_inbound(self, raw: str | bytes, db: Any, event_bus: Any) -> dict[str, Any]:
         """
         Parse a raw inbound email and route it through the shared MessageRouter.
 
@@ -183,7 +183,7 @@ class EmailChannel:
         message_router = MessageRouter(db, event_bus)
         return await message_router.route(inbound)
 
-    def _open_smtp(self, host: str, port: int):
+    def _open_smtp(self, host: str, port: int) -> Any:
         """Open an SMTP connection via the injected factory or stdlib smtplib."""
         if self.smtp_factory is not None:
             return self.smtp_factory(host, port)
@@ -307,8 +307,9 @@ class EmailChannelAdapter(ChannelAdapter):
         self.update_health("unhealthy", connected=False)
 
     async def receive(self) -> AsyncIterator[InboundMessage]:  # pragma: no cover
-        # Inbound mail is handled by the webhook relay endpoint.
-        yield
+        """Webhook-style adapter: inbound mail arrives via the relay endpoint."""
+        if False:
+            yield  # noqa: PLW0127
 
     async def send(self, message: OutboundMessage) -> dict[str, Any]:
         """Deliver a reply over SMTP (thread-offloaded; never raises)."""

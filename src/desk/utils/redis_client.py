@@ -62,12 +62,11 @@ class RedisConnectionManager:
     @asynccontextmanager
     async def get_client(self) -> AsyncGenerator[Redis, None]:
         """Get a Redis client from the pool as an async context manager."""
+        # A failed command (timeout, blip) must not tear down the process-wide
+        # pool: other coroutines still hold clients from it. Reconnection is
+        # handled lazily by connect() on the next acquisition.
         client = await self.connect()
-        try:
-            yield client
-        except Exception:
-            await self.disconnect()
-            raise
+        yield client
 
 
 @lru_cache

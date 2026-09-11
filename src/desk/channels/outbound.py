@@ -74,12 +74,17 @@ class OutboundDispatcher:
             if adapter.config.channel_type == channel:
                 return adapter
 
-        # 2. Canonical channel mapping: allow adapters whose channel_type
-        #    starts with the canonical channel (e.g. "whatsapp_business" -> "whatsapp").
-        #    This supports multiple adapters (Business API, Baileys) for the
-        #    same customer-facing channel.
-        for adapter in adapters:
-            if adapter.config.channel_type.startswith(channel):
-                return adapter
+        # 2. Canonical channel aliases: adapters registered under a provider-
+        #    specific channel_type (e.g. "whatsapp_business") serve the
+        #    canonical customer-facing channel ("whatsapp"). An explicit map
+        #    replaces the previous blind prefix match, which would let any
+        #    similarly-prefixed adapter (e.g. "webchat_widget") steal traffic.
+        aliases = {
+            "whatsapp": ("whatsapp_business", "whatsapp_baileys"),
+        }.get(channel, ())
+        if aliases:
+            for adapter in adapters:
+                if adapter.config.channel_type in aliases:
+                    return adapter
 
         return None

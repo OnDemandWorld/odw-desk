@@ -8,7 +8,7 @@ All configuration is typed and validated at startup.
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -255,6 +255,22 @@ class Settings(BaseSettings):
     s3_bucket: str = Field(default="desk-dev", description="S3 bucket name")
     s3_region: str = Field(default="us-east-1", description="S3 region")
     s3_use_ssl: bool = Field(default=False, description="Use SSL for S3 connections")
+
+    @model_validator(mode="after")
+    def _reject_default_secret_in_production(self) -> "Settings":
+        """Fail fast when production runs on the hard-coded dev secret.
+
+        JWTs are signed with this key, so shipping the default in production
+        lets anyone mint admin tokens (see desk.security.rbac).
+        """
+        if self.environment == "production" and self.secret_key.startswith(
+            "dev-secret-key"
+        ):
+            raise ValueError(
+                "SECRET_KEY must be overridden in production "
+                "(generate one with: openssl rand -hex 32)"
+            )
+        return self
 
 
 @lru_cache

@@ -426,7 +426,7 @@ class ComplianceService:
             result = await self.db.execute(
                 delete(Message).where(Message.conversation_id == conv.id)
             )
-            deleted_messages += result.rowcount or 0
+            deleted_messages += int(getattr(result, "rowcount", 0) or 0)
             await self.db.delete(conv)
 
         await self.db.delete(customer)

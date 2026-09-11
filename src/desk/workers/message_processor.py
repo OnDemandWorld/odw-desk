@@ -16,6 +16,7 @@ from desk.channels.outbound import OutboundDispatcher
 from desk.conversations.manager import ConversationManager
 from desk.db import AsyncSessionLocal
 from desk.events.redis_streams import RedisStreamsEventBus
+from desk.models.conversation import Conversation
 from desk.models.message import Message
 from desk.schemas.channels import OutboundMessage
 from desk.utils.redis_client import get_redis_manager
@@ -89,6 +90,13 @@ class MessageProcessor:
                 channel=channel,
             )
 
+            # The router publishes ``conversation.routed`` before its
+            # transaction commits (webchat commits after route() returns,
+            # webhooks commit via get_db). Wait until the freshly routed
+            # conversation is visible on this session's connection, otherwise
+            # the reply is silently dropped and the event still acked.
+            await self._wait_for_visible_conversation(conversation_id)
+
             # Load prior turns so the LLM answers with full context.
             history = await self._load_history(conversation_id, content)
 
@@ -151,6 +159,37 @@ class MessageProcessor:
                     "ai-processors",
                     event_id,
                 )
+
+    async def _wait_for_visible_conversation(
+        self, conversation_id: str | None, attempts: int = 10, delay: float = 0.2
+    ) -> None:
+        """
+        Poll until the routed conversation is committed and visible to us.
+
+        The processor runs on a separate session/connection, so uncommitted
+        rows from the routing transaction are invisible. Polls for ~2s before
+        giving up (a truly bogus event still acks quickly afterwards).
+        """
+        if not conversation_id:
+            return
+        from uuid import UUID as UUIDType
+
+        try:
+            conv_uuid = UUIDType(str(conversation_id))
+        except (ValueError, AttributeError):
+            return
+        async with AsyncSessionLocal() as session:
+            for _ in range(attempts):
+                result = await session.execute(
+                    select(Conversation.id).where(Conversation.id == conv_uuid)
+                )
+                if result.scalar_one_or_none() is not None:
+                    return
+                await asyncio.sleep(delay)
+        logger.warning(
+            "Conversation still invisible after commit-wait; continuing",
+            conversation_id=conversation_id,
+        )
 
     async def _load_history(
         self, conversation_id: str, current_content: str

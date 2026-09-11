@@ -46,5 +46,10 @@ async def require_api_key(
         if scheme.lower() == "bearer" and token:
             provided = token.strip()
 
-    if not provided or not hmac.compare_digest(provided, expected_key):
+    # compare_digest requires ASCII-only str; encode so non-ASCII input
+    # produces a 401 instead of an unhandled TypeError (500).
+    if (
+        not provided
+        or not hmac.compare_digest(provided.encode("utf-8"), expected_key.encode("utf-8"))
+    ):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")

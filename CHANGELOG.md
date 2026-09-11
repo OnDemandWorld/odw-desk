@@ -5,6 +5,73 @@ All notable changes to ODW.ai Desk will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-09-11
+
+### Fixed — correctness (data loss / crash bugs)
+- **Admin AI configuration**: `POST /setup/ai-model`, `GET|PUT /config/ai` read and wrote
+  ORM attributes that do not exist on `AIConfiguration` (creation raised `TypeError`,
+  updates were silently discarded). Requests now map to the real columns — frontier
+  providers (`openai`/`anthropic`) persist provider/model/encrypted API key, local
+  providers persist model/endpoint, and `max_tokens`/`temperature` are stored in
+  `routing_policy`.
+- **Brand persona**: persona service and `/admin/personas/active` read non-existent
+  columns (`voice_description`, `dos_and_donts`, `vocabulary_guidelines`,
+  `example_phrases`, `lora_adapter_*`) → 500 or missing prompt content. Now aligned
+  with the real `BrandPersona` columns (`dos`/`donts`, `vocabulary_notes`,
+  `few_shot_examples`, `adapter_uri`/`adapter_version`).
+- **Conversation reopen**: a customer messaging after their conversation was resolved
+  hit the `(channel, channel_conversation_id)` unique constraint → `IntegrityError`,
+  the message was lost and the webhook returned 500. Threads are now looked up across
+  all statuses and resolved/closed conversations are re-opened to `active`.
+- **Message metadata**: `Message(metadata=…)` targeted the reserved Declarative
+  attribute instead of the `metadata_` column, so AI/routing/media/agent metadata was
+  silently never persisted (inbox confidence scores were always empty). Same fix in
+  `CustomerResolver` (`metadata_=`).
+- **Compliance (GDPR) export/delete**: the default actor id `"system"` was bound to
+  the UUID `audit_logs.actor_id` column → asyncpg `ValueError`, the audit write failed
+  and the whole erasure rolled back while the API returned 404. Non-UUID actors are
+  now stored as `NULL` with the raw value preserved in `details.actor_id_raw`.
+  `audit_logs.event_type` (NOT NULL) is now derived from the action, and the hash
+  chain write/verify sides serialize identically (previously verification could never
+  reproduce the stored hashes).
+- **SLA scanner**: the background scan lazy-loaded `Conversation.messages` inside an
+  async context (`MissingGreenlet`) — every scan failed and SLA breaches never
+  escalated. Messages are now eager-loaded.
+- **Agent list endpoint**: `GET /agents/agents` triggered lazy relationship loading
+  in async context (guaranteed 500). Open-conversation counts now come from a grouped
+  SQL query.
+- **License manager**: rewrote to the actual `LicenseState` columns (`status`,
+  `valid_until`, `grace_period_ends`, `features`, `last_validated_at`) — the previous
+  version constructed the model with non-existent attributes and always crashed.
+- **Message processor race**: the router publishes `conversation.routed` before its
+  transaction commits; the processor (separate session) could miss the conversation
+  and silently drop the reply. It now waits briefly for commit visibility first.
+- **WebSocket connection manager**: multiple connections per agent are now tracked
+  independently — a second tab no longer clobbers the first, and closing the older
+  tab no longer deregisters the live connection.
+
+### Fixed — security hardening
+- **Agent WebSocket authentication**: `/ws/agents/{agent_id}` accepted any visitor and
+  streamed full customer messages/escalations. The handshake now mirrors the REST
+  API-key guard: when `DESK_API_KEY` is set, clients must present it via `?token=`,
+  `X-API-Key`, or `Authorization: Bearer` (close code 4401); unset stays open for dev.
+- **Production secret guard**: `Settings` now refuses to start in `production` with
+  the hard-coded default `SECRET_KEY` (JWTs are signed with it).
+- **API-key comparison**: `hmac.compare_digest` now receives UTF-8 bytes so non-ASCII
+  key input returns 401 instead of an unhandled `TypeError` (500).
+- **Outbound routing**: replaced blind `startswith` adapter matching with an explicit
+  canonical alias map so similarly-prefixed adapters cannot steal channel traffic.
+- **Redis resilience**: a single failed Redis command no longer tears down the shared
+  connection pool used by the whole process.
+
+### Changed
+- `GET /api/v1/admin/config/ai` response shape now reflects the real configuration
+  (`frontier_provider`, `frontier_model_name`, `local_model_name`,
+  `local_model_endpoint`); `max_tokens`/`temperature` round-trip via `routing_policy`.
+
+### Added
+- `docs/USER_GUIDE_zh-CN.md` — non-technical user guide (Chinese).
+
 ## [1.0.0] - 2026-06-24
 
 ### Added

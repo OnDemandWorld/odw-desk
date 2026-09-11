@@ -17,6 +17,7 @@ import time
 import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from types import TracebackType
 from typing import Any
 
 import structlog
@@ -185,7 +186,12 @@ class Span:
     def __enter__(self) -> "Span":
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.end(status="error" if exc_type is not None else "ok")
 
 

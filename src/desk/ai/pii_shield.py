@@ -142,7 +142,9 @@ class PIIShield:
             if pii_detected:
                 anonymizer_result = self.anonymizer.anonymize(
                     text=text,
-                    analyzer_results=analyzer_results,
+                    # analyzer vs anonymizer ship distinct RecognizerResult
+                    # classes with identical shape — same objects at runtime.
+                    analyzer_results=analyzer_results,  # type: ignore[arg-type]
                 )
                 redacted_text = anonymizer_result.text
             else:

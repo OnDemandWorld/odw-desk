@@ -18,6 +18,12 @@ from desk.models.license_state import LicenseState
 
 logger = structlog.get_logger()
 
+# Values stored in / read from LicenseState.status (see the model's comment).
+STATUS_ACTIVE = "active"
+STATUS_EXPIRED = "expired"
+STATUS_GRACE_PERIOD = "grace_period"
+STATUS_INVALID = "invalid"
+
 
 class LicenseTier(StrEnum):
     """License tier levels."""
@@ -108,14 +114,17 @@ class LicenseManager:
 
         if not self._license_state:
             # Create default free tier license
+            now = datetime.now(tz=UTC)
             self._license_state = LicenseState(
                 license_key=self.settings.license_key,
                 tier=LicenseTier.FREE.value,
-                is_valid=True,
-                activated_at=datetime.now(tz=UTC),
-                expires_at=datetime.now(tz=UTC) + timedelta(days=36500),  # ~100 years
-                grace_period_days=self.settings.license_grace_period_days,
-                metadata_={"auto_generated": True},
+                status=STATUS_ACTIVE,
+                valid_until=now + timedelta(days=36500),  # ~100 years
+                grace_period_ends=now + timedelta(
+                    days=36500 + self.settings.license_grace_period_days
+                ),
+                features={f.value: True for f in TIER_FEATURES[LicenseTier.FREE]},
+                last_validated_at=now,
             )
             self.db.add(self._license_state)
             await self.db.commit()
@@ -124,7 +133,7 @@ class LicenseManager:
             logger.info(
                 "License state loaded",
                 tier=self._license_state.tier,
-                is_valid=self._license_state.is_valid,
+                status=self._license_state.status,
             )
 
     async def validate_license(self) -> bool:
@@ -141,28 +150,31 @@ class LicenseManager:
         now = datetime.now(tz=UTC)
 
         # Check if license is expired
-        if self._license_state.expires_at and now > self._license_state.expires_at:
+        if self._license_state.valid_until and now > self._license_state.valid_until:
             # Check grace period
-            grace_end = self._license_state.expires_at + timedelta(
-                days=self._license_state.grace_period_days or 0
-            )
+            grace_end = self._license_state.grace_period_ends or self._license_state.valid_until
             if now > grace_end:
                 # Grace period expired
-                self._license_state.is_valid = False
+                self._license_state.status = STATUS_EXPIRED
+                self._license_state.last_validated_at = now
                 await self.db.commit()
                 logger.warning("License expired and grace period ended")
                 return False
-            else:
-                # In grace period
-                logger.warning(
-                    "License expired, in grace period",
-                    grace_end=grace_end.isoformat(),
-                )
-                return True
+            # In grace period
+            if self._license_state.status != STATUS_GRACE_PERIOD:
+                self._license_state.status = STATUS_GRACE_PERIOD
+                self._license_state.last_validated_at = now
+                await self.db.commit()
+            logger.warning(
+                "License expired, in grace period",
+                grace_end=grace_end.isoformat(),
+            )
+            return True
 
         # License is valid
-        if not self._license_state.is_valid:
-            self._license_state.is_valid = True
+        if self._license_state.status != STATUS_ACTIVE:
+            self._license_state.status = STATUS_ACTIVE
+            self._license_state.last_validated_at = now
             await self.db.commit()
 
         return True
@@ -181,8 +193,12 @@ class LicenseManager:
             logger.error("License state not initialized")
             return False
 
-        if not self._license_state.is_valid:
-            logger.warning("License invalid, feature denied", feature=feature.value)
+        if self._license_state.status not in (STATUS_ACTIVE, STATUS_GRACE_PERIOD):
+            logger.warning(
+                "License invalid, feature denied",
+                feature=feature.value,
+                status=self._license_state.status,
+            )
             return False
 
         tier = LicenseTier(self._license_state.tier)
@@ -215,20 +231,26 @@ class LicenseManager:
 
         assert self._license_state is not None
 
+        now = datetime.now(tz=UTC)
         self._license_state.license_key = license_key
         self._license_state.tier = tier.value
-        self._license_state.is_valid = True
-        self._license_state.activated_at = datetime.now(tz=UTC)
-        self._license_state.expires_at = datetime.now(tz=UTC) + timedelta(days=365)
+        self._license_state.status = STATUS_ACTIVE
+        self._license_state.valid_until = now + timedelta(days=365)
+        self._license_state.grace_period_ends = now + timedelta(
+            days=365 + self.settings.license_grace_period_days
+        )
+        self._license_state.features = {f.value: True for f in TIER_FEATURES[tier]}
+        self._license_state.last_validated_at = now
 
         await self.db.commit()
 
         logger.info("License activated", tier=tier.value, key=license_key[:10])
 
+        assert self._license_state.valid_until is not None
         return {
             "success": True,
             "tier": tier.value,
-            "expires_at": self._license_state.expires_at.isoformat(),
+            "expires_at": self._license_state.valid_until.isoformat(),
         }
 
     async def get_license_info(self) -> dict[str, Any]:
@@ -244,10 +266,23 @@ class LicenseManager:
         return {
             "license_key": self._license_state.license_key,
             "tier": tier.value,
-            "is_valid": self._license_state.is_valid,
-            "activated_at": self._license_state.activated_at.isoformat() if self._license_state.activated_at else None,
-            "expires_at": self._license_state.expires_at.isoformat() if self._license_state.expires_at else None,
-            "grace_period_days": self._license_state.grace_period_days,
+            "status": self._license_state.status,
+            "is_valid": self._license_state.status in (STATUS_ACTIVE, STATUS_GRACE_PERIOD),
+            "activated_at": (
+                self._license_state.created_at.isoformat()
+                if self._license_state.created_at
+                else None
+            ),
+            "expires_at": (
+                self._license_state.valid_until.isoformat()
+                if self._license_state.valid_until
+                else None
+            ),
+            "grace_period_ends": (
+                self._license_state.grace_period_ends.isoformat()
+                if self._license_state.grace_period_ends
+                else None
+            ),
             "allowed_features": [f.value for f in allowed_features],
-            "metadata": self._license_state.metadata_,
+            "features": self._license_state.features,
         }

@@ -48,6 +48,7 @@ class ComplianceEngine:
         resource_id: str,
         details: dict[str, Any] | None = None,
         ip_address: str | None = None,
+        event_type: str | None = None,
     ) -> AuditLog:
         """
         Log an audit event with hash chain for tamper evidence.
@@ -71,34 +72,60 @@ class ComplianceEngine:
 
         previous_hash = latest_log.hash if latest_log else "0" * 64
 
-        # Build the log entry data
+        # Coerce the actor to the UUID column type. Free-text actors (e.g. the
+        # default "system") cannot bind to the PG UUID column — asyncpg rejects
+        # the INSERT and the surrounding GDPR operation would roll back. The
+        # raw value is preserved in details so attribution is never lost.
+        actor_uuid: UUID | None = None
+        try:
+            actor_uuid = UUID(str(actor_id))
+        except (ValueError, AttributeError, TypeError):
+            actor_uuid = None
+        details_stored = dict(details or {})
+        if actor_uuid is None and actor_id:
+            details_stored.setdefault("actor_id_raw", str(actor_id))
+
+        timestamp = datetime.now(tz=UTC)
+
+        # event_type is a NOT NULL column with no default; derive it from the
+        # action unless the caller supplies one explicitly.
+        resolved_event_type = event_type or {
+            "export": "data_access",
+            "delete": "data_deletion",
+        }.get(action, "data_access")
+
+        # Build the log entry data. Values must serialize exactly as they are
+        # stored, so verify_audit_chain re-derives the identical input.
         log_data = {
             "action": action,
-            "actor_id": actor_id,
+            "actor_id": str(actor_uuid) if actor_uuid else None,
             "actor_type": actor_type,
+            "event_type": resolved_event_type,
             "resource_type": resource_type,
-            "resource_id": resource_id,
-            "details": details or {},
+            "resource_id": str(resource_id),
+            "details": details_stored,
             "ip_address": ip_address,
             "previous_hash": previous_hash,
-            "timestamp": datetime.now(tz=UTC).isoformat(),
+            "timestamp": timestamp.isoformat(),
         }
 
         # Calculate hash
-        log_json = json.dumps(log_data, sort_keys=True)
+        log_json = json.dumps(log_data, sort_keys=True, default=str)
         current_hash = hashlib.sha256(log_json.encode()).hexdigest()
 
         # Create audit log entry
         audit_log = AuditLog(
             action=action,
-            actor_id=actor_id,
+            actor_id=actor_uuid,
             actor_type=actor_type,
+            event_type=resolved_event_type,
             resource_type=resource_type,
             resource_id=resource_id,
-            details=details or {},
+            details=details_stored,
             ip_address=ip_address,
             previous_hash=previous_hash,
             hash=current_hash,
+            timestamp=timestamp,
         )
 
         self.db.add(audit_log)
@@ -138,19 +165,20 @@ class ComplianceEngine:
                     "actual": log.previous_hash,
                 })
 
-            # Verify current hash
+            # Verify current hash (serialization mirrors log_audit_event)
             log_data = {
                 "action": log.action,
-                "actor_id": log.actor_id,
+                "actor_id": str(log.actor_id) if log.actor_id else None,
                 "actor_type": log.actor_type,
+                "event_type": log.event_type,
                 "resource_type": log.resource_type,
-                "resource_id": log.resource_id,
+                "resource_id": str(log.resource_id),
                 "details": log.details,
                 "ip_address": log.ip_address,
                 "previous_hash": log.previous_hash,
                 "timestamp": log.timestamp.isoformat() if log.timestamp else None,
             }
-            log_json = json.dumps(log_data, sort_keys=True)
+            log_json = json.dumps(log_data, sort_keys=True, default=str)
             expected_hash = hashlib.sha256(log_json.encode()).hexdigest()
 
             if log.hash != expected_hash:
@@ -233,24 +261,24 @@ class ComplianceEngine:
             Export data structure
         """
         # Get customer
-        query = select(Customer).where(Customer.id == customer_id)
-        result = await self.db.execute(query)
-        customer = result.scalar_one_or_none()
+        customer_query = select(Customer).where(Customer.id == customer_id)
+        customer_result = await self.db.execute(customer_query)
+        customer = customer_result.scalar_one_or_none()
 
         if not customer:
             raise ValueError(f"Customer {customer_id} not found")
 
         # Get all conversations for this customer
-        query = (
+        conv_query = (
             select(Conversation)
             .where(Conversation.customer_id == customer_id)
             .order_by(Conversation.created_at.asc())
         )
-        result = await self.db.execute(query)
-        conversations = result.scalars().all()
+        conv_result = await self.db.execute(conv_query)
+        conversations = conv_result.scalars().all()
 
         # Build export structure
-        export_data = {
+        export_data: dict[str, Any] = {
             "customer": {
                 "id": str(customer.id),
                 "channel_identifiers": customer.channel_identifiers,
@@ -334,17 +362,17 @@ class ComplianceEngine:
             Deletion summary
         """
         # Get customer
-        query = select(Customer).where(Customer.id == customer_id)
-        result = await self.db.execute(query)
-        customer = result.scalar_one_or_none()
+        customer_query = select(Customer).where(Customer.id == customer_id)
+        customer_result = await self.db.execute(customer_query)
+        customer = customer_result.scalar_one_or_none()
 
         if not customer:
             raise ValueError(f"Customer {customer_id} not found")
 
         # Get all conversations for this customer
-        query = select(Conversation).where(Conversation.customer_id == customer_id)
-        result = await self.db.execute(query)
-        conversations = result.scalars().all()
+        conv_query = select(Conversation).where(Conversation.customer_id == customer_id)
+        conv_result = await self.db.execute(conv_query)
+        conversations = conv_result.scalars().all()
 
         deleted_messages = 0
         deleted_conversations = len(conversations)

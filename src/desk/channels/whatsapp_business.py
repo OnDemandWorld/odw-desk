@@ -267,7 +267,8 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(url, headers=headers)
                 response.raise_for_status()
-                return response.json().get("url")
+                resolved = response.json().get("url")
+                return str(resolved) if resolved else None
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "WhatsApp media URL resolution failed",

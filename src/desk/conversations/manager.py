@@ -63,27 +63,44 @@ class ConversationManager:
         Returns:
             Existing or new Conversation
         """
+        # Look up by the exact (channel, channel_conversation_id) thread across
+        # ALL statuses. uq_conversations_channel_conversation_id guarantees at
+        # most one row per thread, so a resolved/closed conversation can never
+        # be re-created — creating one raised IntegrityError and lost the
+        # customer's message (webhook 500).
         result = await self.db.execute(
             select(Conversation)
             .where(Conversation.customer_id == customer.id)
             .where(Conversation.channel == channel)
-            .where(Conversation.status.in_([ConversationStatus.ACTIVE, ConversationStatus.PENDING, ConversationStatus.ESCALATED]))
+            .where(Conversation.channel_conversation_id == channel_conversation_id)
             .order_by(Conversation.updated_at.desc())
             .limit(1)
         )
         conversation = result.scalar_one_or_none()
 
-        if conversation is None:
-            conversation = Conversation(
-                customer_id=customer.id,
-                channel=channel,
-                channel_conversation_id=channel_conversation_id,
-                status=ConversationStatus.NEW,
-                ai_enabled=True,
-                confidence_threshold=0.7,
-            )
-            self.db.add(conversation)
-            await self.db.flush()
+        if conversation is not None:
+            # Customer came back: reopen finished conversations. RESOLVED →
+            # ACTIVE is a state-machine transition; CLOSED allows none, but the
+            # unique constraint forbids a replacement row, so the thread is
+            # force-reopened to keep customer messages flowing.
+            if conversation.status in (
+                ConversationStatus.RESOLVED,
+                ConversationStatus.CLOSED,
+            ):
+                conversation.status = ConversationStatus.ACTIVE
+                await self.db.flush()
+            return conversation
+
+        conversation = Conversation(
+            customer_id=customer.id,
+            channel=channel,
+            channel_conversation_id=channel_conversation_id,
+            status=ConversationStatus.NEW,
+            ai_enabled=True,
+            confidence_threshold=0.7,
+        )
+        self.db.add(conversation)
+        await self.db.flush()
 
         return conversation
 
@@ -116,7 +133,7 @@ class ConversationManager:
             sender_id=sender_id,
             content=content,
             channel_message_id=channel_message_id,
-            metadata=metadata or {},
+            metadata_=metadata or {},
             created_at=datetime.now(tz=UTC),
         )
         self.db.add(message)

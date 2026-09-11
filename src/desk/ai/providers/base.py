@@ -78,7 +78,7 @@ class LLMProvider(ABC):
         pass
 
     @abstractmethod
-    async def stream(self, request: LLMRequest) -> AsyncIterator[str]:
+    def stream(self, request: LLMRequest) -> AsyncIterator[str]:
         """
         Stream text generation (if supported).
 

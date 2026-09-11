@@ -10,6 +10,7 @@ concern and is intentionally out of scope for V1.1.
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from desk.agents.websocket import broadcast_escalation
 from desk.models.conversation import Conversation
@@ -34,8 +35,13 @@ async def scan_due_conversations(
     """
     service = service or SLAService(db)
 
+    # Eager-load messages: the SLA evaluation reads the conversation's
+    # message timestamps, and a lazy load inside this async context would
+    # fail with MissingGreenlet — the scan then never escalates anything.
     result = await db.execute(
-        select(Conversation).where(Conversation.status.in_(ACTIVE_STATUSES))
+        select(Conversation)
+        .where(Conversation.status.in_(ACTIVE_STATUSES))
+        .options(selectinload(Conversation.messages))
     )
     conversations = result.scalars().all()
 

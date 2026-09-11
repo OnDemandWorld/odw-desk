@@ -17,7 +17,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -37,7 +37,7 @@ logger = structlog.get_logger()
 
 router = APIRouter(tags=["WebChat"])
 
-WEBCHAT_CHANNEL = "webchat"
+WEBCHAT_CHANNEL: Literal["webchat"] = "webchat"
 
 # Inbound frame types treated as rich media (metadata only — no binary storage).
 MEDIA_FRAME_TYPES = ("image", "file")
@@ -145,8 +145,9 @@ class WebChatAdapter(ChannelAdapter):
         self.update_health("unhealthy", connected=False)
 
     async def receive(self) -> AsyncIterator[InboundMessage]:  # pragma: no cover
-        # Inbound web-chat frames are handled by the WS endpoint directly.
-        yield
+        """Webhook-style adapter: inbound frames arrive over the WS endpoint."""
+        if False:
+            yield  # noqa: PLW0127
 
     async def send(self, message: OutboundMessage) -> dict[str, Any]:
         """Push a reply to the visitor's live WebSocket."""
@@ -251,7 +252,7 @@ async def mark_message_read(db: Any, message_id: str) -> Message | None:
     result = await db.execute(
         select(Message).where(Message.channel_message_id == message_id)
     )
-    message = result.scalar_one_or_none()
+    message: Message | None = result.scalar_one_or_none()
 
     if message is None:
         try:

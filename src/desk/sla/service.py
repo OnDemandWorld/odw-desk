@@ -15,6 +15,8 @@ The evaluation maps onto the ACTUAL conversation schema:
 
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from typing import Literal
+from uuid import UUID
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -112,7 +114,7 @@ class SLAService:
 
         return SLAStatus.OK
 
-    async def escalate(self, conversation_id, reason: str | None = None) -> bool:
+    async def escalate(self, conversation_id: UUID, reason: str | None = None) -> bool:
         """
         Escalate a conversation to the ``escalated`` state.
 
@@ -161,7 +163,7 @@ class SLAService:
         """Publish an SLA breach event best-effort (never raises)."""
         if self.event_bus is None:
             return
-        sla_type = (
+        sla_type: Literal["first_response", "resolution"] = (
             "resolution"
             if breach is SLAStatus.BREACHED_RESOLUTION
             else "first_response"
@@ -190,12 +192,11 @@ class SLAService:
         """Earliest ai/agent message timestamp, or None if no response yet."""
         messages = getattr(conversation, "messages", None) or []
         times = [
-            SLAService._aware(message.created_at)
+            t
             for message in messages
             if getattr(message, "sender_type", None) in RESPONSE_SENDER_TYPES
-            and getattr(message, "created_at", None) is not None
+            and (t := SLAService._aware(getattr(message, "created_at", None))) is not None
         ]
-        times = [t for t in times if t is not None]
         return min(times) if times else None
 
     @staticmethod

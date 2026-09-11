@@ -51,7 +51,7 @@ class CustomerResolver:
             customer = Customer(
                 channel_identifiers={channel: identifier},
                 display_name=display_name,
-                metadata={},
+                metadata_={},
             )
             self.db.add(customer)
             await self.db.flush()

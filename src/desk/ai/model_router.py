@@ -215,11 +215,17 @@ class ModelRouter:
                     )
             else:
                 # Simple query, use local model
+                fallback = (
+                    ([self.frontier_model_name] if self.frontier_model_name else [])
+                    + ["escalate_to_human"]
+                    if self.frontier_enabled
+                    else ["escalate_to_human"]
+                )
                 return RoutingDecision(
                     target=ModelTarget.LOCAL,
                     model_endpoint=self.local_model_endpoint,
                     model_name=self.local_model_name,
-                    fallback_chain=[self.frontier_model_name, "escalate_to_human"] if self.frontier_enabled else ["escalate_to_human"],
+                    fallback_chain=fallback,
                     reasoning=f"Low complexity ({complexity_score:.2f}), using local model",
                 )
 

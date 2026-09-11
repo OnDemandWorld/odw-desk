@@ -69,13 +69,9 @@ Keep responses concise and focused on resolving the customer's issue."""
         # Inject persona attributes
         prompt_parts = [base_prompt]
 
-        # Add brand voice
-        if persona.voice_description:
-            prompt_parts.append(f"\n\nBrand Voice: {persona.voice_description}")
-
         # Add tone
         if persona.tone:
-            prompt_parts.append(f"Tone: {persona.tone}")
+            prompt_parts.append(f"\n\nBrand Voice: {persona.tone}")
 
         # Add formality level
         if persona.formality_level:
@@ -87,28 +83,25 @@ Keep responses concise and focused on resolving the customer's issue."""
             prompt_parts.append(formality_map.get(persona.formality_level, ""))
 
         # Add do's and don'ts
-        if persona.dos_and_donts:
-            dos = persona.dos_and_donts.get("do", [])
-            donts = persona.dos_and_donts.get("dont", [])
-
-            if dos:
+        if persona.dos or persona.donts:
+            if persona.dos:
                 prompt_parts.append("\n\nDo:")
-                for do_item in dos:
+                for do_item in persona.dos:
                     prompt_parts.append(f"- {do_item}")
 
-            if donts:
+            if persona.donts:
                 prompt_parts.append("\n\nDon't:")
-                for dont_item in donts:
+                for dont_item in persona.donts:
                     prompt_parts.append(f"- {dont_item}")
 
         # Add vocabulary guidelines
-        if persona.vocabulary_guidelines:
-            prompt_parts.append(f"\n\nVocabulary: {persona.vocabulary_guidelines}")
+        if persona.vocabulary_notes:
+            prompt_parts.append(f"\n\nVocabulary: {persona.vocabulary_notes}")
 
         # Add example phrases
-        if persona.example_phrases:
+        if persona.few_shot_examples:
             prompt_parts.append("\n\nExample phrases:")
-            for phrase in persona.example_phrases[:3]:  # Limit to 3 examples
+            for phrase in persona.few_shot_examples[:3]:  # Limit to 3 examples
                 prompt_parts.append(f'- "{phrase}"')
 
         return "\n".join(prompt_parts)
@@ -150,9 +143,9 @@ Keep responses concise and focused on resolving the customer's issue."""
         }
 
         # Add LoRA adapter info if using adapter backend
-        if persona_backend == "lora_adapter" and persona.lora_adapter_uri:
-            result["lora_adapter_uri"] = persona.lora_adapter_uri
-            result["lora_adapter_version"] = persona.lora_adapter_version
+        if persona_backend == "lora_adapter" and persona.adapter_uri:
+            result["lora_adapter_uri"] = persona.adapter_uri
+            result["lora_adapter_version"] = persona.adapter_version
 
         return result
 
@@ -184,8 +177,8 @@ Keep responses concise and focused on resolving the customer's issue."""
         result = await self.db.execute(query)
         all_personas = result.scalars().all()
 
-        for persona in all_personas:
-            persona.is_active = False
+        for active_persona in all_personas:
+            active_persona.is_active = False
 
         # Activate the specified persona
         persona = await self.get_persona_by_id(persona_id)

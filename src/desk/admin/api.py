@@ -5,16 +5,18 @@ Admin setup wizard, configuration management, and compliance APIs.
 """
 
 import csv
+import hashlib
 import io
 from datetime import datetime
 from typing import Any
-from uuid import UUID
+from uuid import NAMESPACE_DNS, UUID, uuid5
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.selectable import Select
 
 from desk.compliance.service import VALID_DELETE_MODES, ComplianceService
 from desk.config import get_settings
@@ -22,10 +24,22 @@ from desk.dependencies import get_db
 from desk.models.ai_configuration import AIConfiguration
 from desk.models.audit_log import AuditLog
 from desk.security.rbac import require_role
+from desk.utils.encryption import FieldEncryption
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
+
+_FRONTIER_PROVIDERS = ("openai", "anthropic")
+
+
+def _deployment_uuid() -> UUID:
+    """Map the free-form deployment id onto the UUID column deterministically."""
+    deployment_id = get_settings().deployment_id
+    try:
+        return UUID(deployment_id)
+    except (ValueError, AttributeError):
+        return uuid5(NAMESPACE_DNS, deployment_id)
 
 
 # ============================================================================
@@ -125,19 +139,27 @@ async def configure_ai_model(
 
     if not ai_config:
         ai_config = AIConfiguration(
-            provider=provider,
-            model_name=model_name,
-            api_key_encrypted=api_key or "",
-            endpoint=endpoint or "",
+            deployment_id=_deployment_uuid(),
+            system_prompt="You are a helpful customer support agent.",
         )
         db.add(ai_config)
-    else:
-        ai_config.provider = provider
-        ai_config.model_name = model_name
+
+    if provider in _FRONTIER_PROVIDERS:
+        ai_config.frontier_provider = provider
+        ai_config.frontier_model_name = model_name
         if api_key:
-            ai_config.api_key_encrypted = api_key
+            # Derive a 32-byte AES key from the app secret (same fallback as
+            # FieldEncryption.from_env, but sourced from settings so this works
+            # even when SECRET_KEY is not exported to the environment).
+            key = hashlib.sha256(get_settings().secret_key.encode()).digest()
+            encrypted = FieldEncryption(key).encrypt(api_key)
+            ai_config.frontier_api_key_encrypted = encrypted.encode("ascii")
+    else:
+        # Local model (ollama / vLLM / …): provider itself is not persisted;
+        # the engine instantiates the local provider from settings.
+        ai_config.local_model_name = model_name
         if endpoint:
-            ai_config.endpoint = endpoint
+            ai_config.local_model_endpoint = endpoint
 
     await db.commit()
 
@@ -166,14 +188,17 @@ async def get_ai_configuration(db: AsyncSession = Depends(get_db)) -> dict[str, 
     if not ai_config:
         return {"configured": False}
 
+    routing_policy = ai_config.routing_policy or {}
     return {
         "configured": True,
-        "provider": ai_config.provider,
-        "model_name": ai_config.model_name,
-        "endpoint": ai_config.endpoint,
+        "frontier_provider": ai_config.frontier_provider,
+        "frontier_model_name": ai_config.frontier_model_name,
+        "local_model_name": ai_config.local_model_name,
+        "local_model_endpoint": ai_config.local_model_endpoint,
         "confidence_threshold": ai_config.confidence_threshold,
-        "max_tokens": ai_config.max_tokens,
-        "temperature": ai_config.temperature,
+        "max_tokens": routing_policy.get("max_tokens"),
+        "temperature": routing_policy.get("temperature"),
+        "pii_shield_enabled": ai_config.pii_shield_enabled,
         "created_at": ai_config.created_at.isoformat() if ai_config.created_at else None,
     }
 
@@ -195,10 +220,14 @@ async def update_ai_configuration(
 
     if confidence_threshold is not None:
         ai_config.confidence_threshold = confidence_threshold
+
+    # max_tokens / temperature are tuning overrides carried in routing_policy.
+    routing_policy = dict(ai_config.routing_policy or {})
     if max_tokens is not None:
-        ai_config.max_tokens = max_tokens
+        routing_policy["max_tokens"] = max_tokens
     if temperature is not None:
-        ai_config.temperature = temperature
+        routing_policy["temperature"] = temperature
+    ai_config.routing_policy = routing_policy
 
     await db.commit()
 
@@ -207,8 +236,8 @@ async def update_ai_configuration(
     return {
         "success": True,
         "confidence_threshold": ai_config.confidence_threshold,
-        "max_tokens": ai_config.max_tokens,
-        "temperature": ai_config.temperature,
+        "max_tokens": routing_policy.get("max_tokens"),
+        "temperature": routing_policy.get("temperature"),
     }
 
 
@@ -316,7 +345,7 @@ def build_audit_report_query(
     actor: str | None = None,
     action: str | None = None,
     limit: int = 1000,
-):
+) -> Select[tuple[AuditLog]]:
     """
     Build the filtered audit-report query (P1).
 

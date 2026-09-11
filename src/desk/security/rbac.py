@@ -23,6 +23,8 @@ Role resolution for an authenticated principal (in priority order):
 """
 
 import hmac
+from collections.abc import Callable
+from typing import Any
 
 import structlog
 from fastapi import Header, HTTPException
@@ -81,7 +83,7 @@ def resolve_role(
     return settings.desk_default_role
 
 
-def require_role(min_role: str):
+def require_role(min_role: str) -> Callable[..., Any]:
     """
     FastAPI dependency factory enforcing a minimum role on a router/route.
 
@@ -127,7 +129,14 @@ def require_role(min_role: str):
             role = jwt_role
         else:
             provided = x_api_key or bearer_token
-            if not provided or not hmac.compare_digest(provided, expected_key):
+            # compare_digest requires ASCII-only str; encode so non-ASCII
+            # input produces a 401 instead of an unhandled TypeError (500).
+            if (
+                not provided
+                or not hmac.compare_digest(
+                    provided.encode("utf-8"), expected_key.encode("utf-8")
+                )
+            ):
                 raise HTTPException(status_code=401, detail="Invalid or missing API key")
             role = resolve_role(settings, desk_role=desk_role)
 

@@ -65,7 +65,7 @@ async def reports_overview(
     status_rows = (
         await db.execute(select(Conversation.status, func.count()).group_by(Conversation.status))
     ).all()
-    status_counts: dict[str, int] = dict(status_rows)
+    status_counts: dict[str, int] = {row[0]: row[1] for row in status_rows}
     total_conversations = sum(status_counts.values())
     open_conversations = sum(status_counts.get(s, 0) for s in OPEN_STATUSES)
 
@@ -86,7 +86,7 @@ async def reports_overview(
             .group_by(Message.sender_type)
         )
     ).all()
-    messages_by_sender: dict[str, int] = dict(message_rows)
+    messages_by_sender: dict[str, int] = {row[0]: row[1] for row in message_rows}
 
     # 4. AI deflection: conversations active in the window that AI handled
     #    end-to-end (>=1 AI reply, no human-agent message) vs human-touched.
