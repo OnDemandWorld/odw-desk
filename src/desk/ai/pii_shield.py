@@ -5,14 +5,40 @@ Detects personally identifiable information (PII) in messages,
 generates redacted versions, and issues routing directives.
 """
 
+import re
 from enum import StrEnum
 from typing import Any
 
 import structlog
-from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer import AnalyzerEngine, RecognizerResult
 from presidio_anonymizer import AnonymizerEngine
 
 logger = structlog.get_logger()
+
+# Presidio ships English-focused recognizers only; with language="en" Chinese
+# PII (11-digit mobile numbers, resident IDs) passed through undetected — a
+# critical gap for a suite whose primary users write Chinese (R1 acceptance,
+# 2026-09-12). These regex recognizers merge into the Presidio result set.
+_CN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("PHONE_NUMBER", re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")),
+    ("PHONE_NUMBER", re.compile(r"(?<!\d)0\d{2,3}-?\d{7,8}(?!\d)")),
+    (
+        "ID_CARD",
+        re.compile(r"(?<!\d)[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:[0-2]\d|3[01])\d{3}[\dXx](?!\d)"),
+    ),
+)
+
+
+def _cn_recognizer_results(text: str) -> list:
+    """Regex-based recogniser results for Chinese PII, deduped against overlap."""
+    found: list[RecognizerResult] = []
+    for entity_type, pattern in _CN_PATTERNS:
+        for m in pattern.finditer(text):
+            start, end = m.span()
+            if any(r.start <= start and end <= r.end for r in found):
+                continue
+            found.append(RecognizerResult(entity_type=entity_type, start=start, end=end, score=1.0))
+    return found
 
 
 class RoutingDirective(StrEnum):
@@ -128,12 +154,15 @@ class PIIShield:
             )
 
         try:
-            # Analyze text for PII
-            analyzer_results = self.analyzer.analyze(
-                text=text,
-                entities=self.entity_types,
-                language="en",
+            # Analyze text for PII (Presidio en recognizers + CN regex layer)
+            analyzer_results = list(
+                self.analyzer.analyze(
+                    text=text,
+                    entities=self.entity_types,
+                    language="en",
+                )
             )
+            analyzer_results.extend(_cn_recognizer_results(text))
 
             pii_detected = len(analyzer_results) > 0
             pii_types = list({result.entity_type for result in analyzer_results})

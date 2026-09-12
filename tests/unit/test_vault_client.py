@@ -159,20 +159,23 @@ class TestVaultClientRetrieve:
 
         assert docs == []
 
-    async def test_score_filter_drops_low_confidence_chunks(self):
+    async def test_no_absolute_score_filter_keeps_vault_ranking(self):
+        """Regression (combo C-B03): Vault's fused_score scale (~0.03 for good
+        hits) is incompatible with a hard 0.3 cutoff — the old filter dropped
+        every real result. Desk must keep Vault's ranked top_k as-is."""
         client = _make_client()
         chunks = [
-            _chunk(0.2, text="low score"),
-            _chunk(0.5, text="kept"),
-            _chunk(0.3, text="boundary kept"),
+            _chunk(0.2, text="kept low-scale"),
+            _chunk(0.03, text="kept vault-realistic"),
+            _chunk(0.0, text="kept unscored"),
         ]
         response = _vault_response(chunks)
         mock_client = _mock_client_with(response)
 
         with _patch_async_client(response, mock_client):
-            docs = await client.retrieve("filter me")
+            docs = await client.retrieve("keep everything vault ranked")
 
-        assert [d.content for d in docs] == ["kept", "boundary kept"]
+        assert [d.content for d in docs] == ["kept low-scale", "kept vault-realistic", "kept unscored"]
 
 
 class TestVaultClientHealthCheck:

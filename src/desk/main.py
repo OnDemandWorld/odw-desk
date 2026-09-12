@@ -5,6 +5,7 @@ Self-hosted, WhatsApp-first AI customer support agent.
 """
 
 import asyncio
+import os
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -42,6 +43,23 @@ from desk.sla.checker import scan_due_conversations
 from desk.surveys.csat_api import router as csat_router
 from desk.utils.redis_client import get_redis_manager
 from desk.workers.message_processor import MessageProcessor
+
+def _ensure_loopback_bypasses_proxy() -> None:
+    """Ensure loopback hosts bypass HTTP(S) proxies.
+
+    In proxy-equipped environments (HTTP_PROXY/HTTPS_PROXY set), HTTP client
+    libraries route even 127.0.0.1/localhost calls through the proxy unless
+    NO_PROXY lists them — a proxy that cannot reach the loopback service then
+    turns every internal call (Ollama, sibling products) into a 502/500 (found
+    in QA when NO_PROXY contained 127.0.0.0 but not 127.0.0.1).
+    """
+    for key in ("NO_PROXY", "no_proxy"):
+        parts = {p.strip() for p in os.environ.get(key, "").split(",") if p.strip()}
+        if not {"localhost", "127.0.0.1"} <= parts:
+            parts |= {"localhost", "127.0.0.1"}
+            os.environ[key] = ",".join(sorted(parts))
+
+_ensure_loopback_bypasses_proxy()
 
 logger = structlog.get_logger()
 

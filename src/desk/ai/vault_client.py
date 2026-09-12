@@ -28,7 +28,6 @@ logger = structlog.get_logger()
 _DEV_DEFAULT_API_KEY = "vk_dev_local_key"
 
 # Minimum fused_score for a retrieved chunk to be kept.
-_MIN_SCORE = 0.3
 
 
 @dataclass
@@ -64,6 +63,7 @@ class VaultClient:
         default_collection_id: str,
         cache_ttl_seconds: int = 600,  # 10 minutes
         collection_folder_map: dict[str, dict[str, Any]] | None = None,
+        timeout_seconds: float = 120.0,
     ):
         """
         Initialize Vault Client.
@@ -82,6 +82,10 @@ class VaultClient:
         self.vault_api_key = vault_api_key
         self.default_collection_id = default_collection_id
         self.cache_ttl_seconds = cache_ttl_seconds
+        # /query performs full RAG (embed + generate) — real latency with a
+        # local LLM is tens of seconds, so 10s always timed out and grounding
+        # silently degraded to empty (combo test C-B03, 2026-09-12).
+        self.timeout_seconds = timeout_seconds
         self.collection_folder_map = collection_folder_map or {}
 
         # Initialize Redis cache
@@ -153,7 +157,7 @@ class VaultClient:
             if folder_filter:
                 payload["folder_filter"] = folder_filter
 
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.post(
                     f"{self.vault_url}/query",
                     headers=self._auth_headers(),
@@ -188,8 +192,11 @@ class VaultClient:
                     )
                 )
 
-            # Filter low-confidence results (fused_score < 0.3)
-            documents = [doc for doc in documents if doc.score >= _MIN_SCORE]
+            # NOTE: no absolute score filter here. Vault's fused_score lives on
+            # its own scale (~0.03 for good hits with the default weighting), so
+            # the previous `>= 0.3` cutoff dropped EVERY real result and made
+            # Desk→Vault grounding permanently empty (combo test C-B03, 2026-09-12).
+            # Vault already ranks and caps results (top_k) — we trust that ordering.
 
             # Cache the results
             await self.cache.set(
@@ -216,7 +223,7 @@ class VaultClient:
             )
             return []
         except Exception as e:
-            logger.error("Vault retrieval failed", error=str(e), query=query[:50])
+            logger.error("Vault retrieval failed", error=f"{type(e).__name__}: {e}", query=query[:50])
             return []
 
     async def health_check(self) -> bool:
@@ -250,7 +257,7 @@ class VaultClient:
             True when Vault acknowledged the deletion (2xx), False otherwise.
         """
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.delete(
                     f"{self.vault_url}/files/{file_id}",
                     headers=self._auth_headers(),

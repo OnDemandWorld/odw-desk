@@ -5,6 +5,20 @@ All notable changes to ODW.ai Desk will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-09-12（全流程测试与验收轮）
+
+### Fixed — PII / grounding（单项目+组合+三轮验收发现）
+- **中文 PII 漏检**（验收 P0）：PII Shield 仅启用 Presidio en 识别器，中文手机号/座机/身份证完全漏检。
+  新增中文正则识别层（`1[3-9]\d{9}`、固话、居民身份证）并入 Presidio 结果集；+4 单测。
+- **PII 结果不回写消息行**：分析结果此前只用于路由，收件台永远看不到 PII 标记/脱敏文本。
+  AI 引擎分析后回写 `pii_detected/pii_types/content_redacted`（best-effort，不阻断 AI 路径）。
+- **Desk→Vault grounding 三重失效**（组合测试发现）：`fused_score` 阈值 0.3 与 Vault 实际量表（~0.03）
+  不匹配 → 真实结果全被丢弃；httpx 超时 10s vs 真实 RAG 延迟 40s+ → 永远超时；空消息异常不可诊断。
+  现信任 Vault 排序（去绝对阈值）、超时可配置（默认 120s）、错误日志带异常类型。
+- `vault_client` 删除消息缓存键污染防护：检索失败不再写缓存。
+
+### Added
+- `qa/` 套件级测试资产（用例文档 67+19 条、可执行 runner、四阶段报告）。
 ## [Unreleased] - 2026-09-12
 
 ### Changed — security (breaking for key-protected deployments relying on implicit admin)

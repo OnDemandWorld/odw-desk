@@ -7,6 +7,8 @@ Full RAG pipeline: PII detection → model routing → Vault retrieval → LLM i
 
 from dataclasses import dataclass
 
+from sqlalchemy import select
+
 import structlog
 
 from desk.ai.confidence_scorer import ConfidenceScore, ConfidenceScorer
@@ -21,6 +23,7 @@ from desk.config import get_settings
 from desk.conversations.manager import ConversationManager
 from desk.conversations.state_machine import ConversationStatus
 from desk.db import AsyncSessionLocal
+from desk.models.message import Message
 from desk.i18n.service import reply_language, t
 from desk.observability.metrics import ESCALATIONS
 from desk.observability.tracing import start_span
@@ -155,6 +158,37 @@ class AIEngine:
                     pii_detected=pii_result.pii_detected,
                     routing_directive=pii_result.routing_directive.value,
                 )
+
+                # Write the findings back to the stored customer message so the
+                # inbox surfaces PII flags/redacted text — previously analysis
+                # results only fed routing and never reached the message row
+                # (R1 acceptance finding, 2026-09-12). Best-effort: never break
+                # the AI path on a bookkeeping failure.
+                try:
+                    async with AsyncSessionLocal() as pii_db:
+                        msg_result = await pii_db.execute(
+                            select(Message)
+                            .where(
+                                Message.conversation_id == conversation_id,
+                                Message.sender_type == "customer",
+                            )
+                            .order_by(Message.created_at.desc(), Message.id.desc())
+                            .limit(1)
+                        )
+                        customer_message = msg_result.scalar_one_or_none()
+                        if customer_message is not None:
+                            customer_message.pii_detected = pii_result.pii_detected
+                            customer_message.pii_types = pii_result.pii_types
+                            customer_message.content_redacted = (
+                                pii_result.redacted_text if pii_result.pii_detected else None
+                            )
+                            await pii_db.commit()
+                except Exception as write_back_err:  # noqa: BLE001
+                    logger.warning(
+                        "PII write-back failed (best-effort)",
+                        conversation_id=conversation_id,
+                        error=f"{type(write_back_err).__name__}: {write_back_err}",
+                    )
 
                 # Step 1.5: Pre-generation Policy Check
                 async with AsyncSessionLocal() as db:
