@@ -59,15 +59,24 @@ class TestResolveRole:
         get_settings.cache_clear()
         settings = get_settings()
 
-        # Default role is admin (dev single-user).
-        assert resolve_role(settings, authorization=None, desk_role=None) == "admin"
+        # Default role is least-privileged agent (default-deny for admin routes).
+        assert resolve_role(settings, authorization=None, desk_role=None) == "agent"
 
-    def test_invalid_header_falls_back_to_default(self, monkeypatch):
+    def test_invalid_header_does_not_escalate(self, monkeypatch):
         monkeypatch.setenv("DESK_API_KEY", "sekret")
         get_settings.cache_clear()
         settings = get_settings()
 
-        assert resolve_role(settings, authorization=None, desk_role="superuser") == "admin"
+        # An unrecognised role header must fall back to the least-privileged
+        # default, never silently escalate to admin.
+        assert resolve_role(settings, authorization=None, desk_role="superuser") == "agent"
+
+    def test_admin_still_available_explicitly(self, monkeypatch):
+        monkeypatch.setenv("DESK_API_KEY", "sekret")
+        get_settings.cache_clear()
+        settings = get_settings()
+
+        assert resolve_role(settings, authorization=None, desk_role="admin") == "admin"
 
 
 class TestRequireRoleDependency:
@@ -137,6 +146,24 @@ class TestRbacWiring:
             "/api/v1/admin/compliance/reports",
             headers={"X-API-Key": "sekret", "X-Desk-Role": "agent"},
         )
+        assert response.status_code == 403
+
+    def test_unknown_role_header_on_admin_route_is_403(self, client, monkeypatch):
+        """Regression: unknown/absent role headers must not get admin by default."""
+        monkeypatch.setenv("DESK_API_KEY", "sekret")
+        get_settings.cache_clear()
+
+        response = client.get(
+            "/api/v1/admin/compliance/reports",
+            headers={"X-API-Key": "sekret", "X-Desk-Role": "superuser"},
+        )
+        assert response.status_code == 403
+
+    def test_no_role_header_on_admin_route_is_403(self, client, monkeypatch):
+        monkeypatch.setenv("DESK_API_KEY", "sekret")
+        get_settings.cache_clear()
+
+        response = client.get("/api/v1/admin/compliance/reports", headers={"X-API-Key": "sekret"})
         assert response.status_code == 403
 
     def test_admin_on_admin_route_is_200(self, client, monkeypatch):

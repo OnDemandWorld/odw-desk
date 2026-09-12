@@ -5,6 +5,7 @@ Loads database URL from environment and sets up async migration support.
 """
 
 import asyncio
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -18,6 +19,12 @@ from desk.models.base import Base
 
 # this is the Alembic Config object
 config = context.config
+
+# DATABASE_URL wins over alembic.ini so containers/CI can point migrations at
+# the provisioned database without editing files (compose relies on this).
+_env_url = os.environ.get("DATABASE_URL")
+if _env_url:
+    config.set_main_option("sqlalchemy.url", _env_url)
 
 # Interpret the config file for Python logging
 if config.config_file_name is not None:

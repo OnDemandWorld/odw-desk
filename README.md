@@ -2,7 +2,7 @@
 
 **Self-hosted, WhatsApp-first AI customer support agent with full data sovereignty.**
 
-[![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green.svg)](https://fastapi.tiangolo.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -143,11 +143,24 @@ Unlike cloud-based solutions that send customer data to third-party APIs, Desk m
 | **Compliance Engine** | GDPR workflows, audit trails | Hash-chained logging |
 | **License Manager** | Feature gating, tier enforcement | Database-backed |
 
+## Operator Console（操作员控制台）
+
+人工坐席不需要 curl——Desk 自带零构建 Web 控制台（默认随服务启动）：
+
+- **`http://localhost:8000/console`** — 坐席收件台：会话列表、消息历史、接管（Take over）、
+  回复（Send）、解决（Resolve）。首次打开输入 `DESK_API_KEY` 与角色（默认 `agent`）。
+- **`http://localhost:8000/console/webchat`** — 可嵌入 webchat 演示页：访客 WebSocket 客户端，
+  展示 AI 应答与坐席接管的全过程（对接 `/ws/chat/{visitor_id}`）。
+
+> RBAC 提示：设置 `DESK_API_KEY` 后，admin/agent 路由需要 key；角色来自 JWT claim 或
+> `X-Desk-Role` 头，**未知/缺失角色默认最小权限 `agent`**（默认拒绝 admin，
+> 单机开发可显式设 `DESK_DEFAULT_ROLE=admin`）。
+
 ## Quick Start
 
 ### Prerequisites
 
-- Python 3.14+
+- Python 3.11+ (3.12 recommended)
 - PostgreSQL 16+
 - Redis 7+
 - (Optional) Ollama or vLLM for local LLM inference
@@ -178,9 +191,13 @@ cp .env.example .env
 # Edit .env with your configuration
 ```
 
-5. **Initialize database**
+5. **Provision infrastructure & initialize database**
 ```bash
-alembic upgrade head
+# PostgreSQL 与 Redis 必须先可用（可只起套件自带的基础设施：
+#   docker compose -f docker-compose.dev.yml up -d postgres redis minio
+# 然后创建数据库（alembic 只建表，不建库）：
+createdb -h localhost -U postgres desk   # 或 CREATE DATABASE desk;
+alembic upgrade head   # alembic/env.py 会优先读取 DATABASE_URL
 ```
 
 6. **Start the application**
@@ -246,7 +263,7 @@ FRONTIER_API_KEY=your_key
 FRONTIER_MODEL_NAME=gpt-4o-mini
 
 # Vault Integration
-VAULT_URL=http://localhost:8100
+VAULT_URL=http://localhost:8765
 VAULT_API_KEY=your_vault_key
 VAULT_COLLECTION_ID=your_collection_id
 

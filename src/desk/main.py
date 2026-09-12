@@ -6,12 +6,13 @@ Self-hosted, WhatsApp-first AI customer support agent.
 
 import asyncio
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
 
@@ -242,7 +243,23 @@ def create_app() -> FastAPI:
             "name": "ODW.ai Desk",
             "version": settings.app_version,
             "docs": "/docs" if settings.environment != "production" else None,
+            "console": "/console",
+            "webchat_demo": "/console/webchat",
         }
+
+    # ── Operator console (F-12: human agents need a UI, not just REST) ────────
+    # Zero-build static pages speaking the same REST/WS API as integrations.
+    console_dir = Path(__file__).parent / "static"
+
+    @app.get("/console", tags=["Console"], include_in_schema=False)
+    async def console_inbox() -> FileResponse:
+        """Agent inbox: monitor conversations, take over, respond, resolve."""
+        return FileResponse(console_dir / "inbox.html")
+
+    @app.get("/console/webchat", tags=["Console"], include_in_schema=False)
+    async def console_webchat() -> FileResponse:
+        """Embeddable-style webchat demo page (visitor WebSocket client)."""
+        return FileResponse(console_dir / "webchat.html")
 
     @app.get("/metrics", tags=["Observability"])
     async def metrics() -> Response:

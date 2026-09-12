@@ -19,7 +19,11 @@ Backward compatibility (mirrors ``desk.security.api_auth``):
 Role resolution for an authenticated principal (in priority order):
 1. ``role`` claim of a JWT bearer token (HS256, signed with ``settings.secret_key``).
 2. The explicit ``X-Desk-Role`` header (``admin`` / ``agent``).
-3. ``settings.desk_default_role`` (defaults to ``admin`` for dev single-user).
+3. ``settings.desk_default_role`` (defaults to the least-privileged ``agent``).
+
+Default-deny: an unrecognised or absent role must not escalate — the fallback is
+the least-privileged role, so admin access always requires an explicit
+``X-Desk-Role: admin`` header or a JWT ``role: admin`` claim.
 """
 
 import hmac

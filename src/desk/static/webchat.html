@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ODW Desk — Webchat Demo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  /* ODW.ai brand tokens — mirrors odw-vault/ui/gradio_app.py */
+  :root {
+    --bg-app: #F6F2EC; --bg-primary: #FFFFFF; --bg-secondary: #ECE6DC;
+    --text-primary: #14110F; --text-secondary: #2A2622; --text-tertiary: #5A544E;
+    --border-default: #D6CFC0; --border-subtle: rgba(20,17,15,0.08);
+    --accent: #FF5A1F; --accent-hover: #E04A12; --accent-subtle: #FFE9DF; --accent-fg: #14110F;
+    --success: #1F7A4D; --error: #DC4B5C;
+    --font-display: "Instrument Serif", "Times New Roman", serif;
+    --font-sans: "Inter", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", "SF Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg-app: #14110F; --bg-primary: #1C1815; --bg-secondary: #262019;
+      --text-primary: #F6F2EC; --text-secondary: #D6CFC4; --text-tertiary: #A8A096;
+      --border-default: #3A322B; --accent-subtle: rgba(255,90,31,0.16);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg-app); color: var(--text-primary); font-family: var(--font-sans);
+         display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .widget { width: 400px; height: 640px; max-height: 92vh; display: flex; flex-direction: column;
+            background: var(--bg-primary); border: 1px solid var(--border-default); border-radius: 14px;
+            box-shadow: 0 12px 40px -20px rgba(20,17,15,0.35); overflow: hidden; }
+  .head { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--border-default); }
+  .brand-serif { font-family: var(--font-display); font-size: 22px; }
+  .brand-serif .dot { color: var(--accent); }
+  .state { margin-left: auto; font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.1em;
+           text-transform: uppercase; color: var(--text-tertiary); display: flex; align-items: center; gap: 6px; }
+  .state .led { width: 8px; height: 8px; border-radius: 50%; background: var(--text-tertiary); }
+  .state.on .led { background: var(--success); }
+  .state.err .led { background: var(--error); }
+  #log { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
+  .bubble { max-width: 78%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+  .bubble.me { align-self: flex-end; background: var(--accent-subtle); }
+  .bubble.them { align-self: flex-start; background: var(--bg-app); border: 1px solid var(--border-default); }
+  .bubble.sys { align-self: center; background: transparent; color: var(--text-tertiary); font-size: 12px; font-family: var(--font-mono); }
+  form { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border-default); }
+  input { flex: 1; padding: 11px 14px; border: 1px solid var(--border-default); border-radius: 8px;
+          background: var(--bg-app); color: var(--text-primary); font-family: inherit; font-size: 14px; }
+  button { padding: 10px 18px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent);
+           color: var(--accent-fg); font-weight: 600; font-size: 14px; }
+  button:hover { background: var(--accent-hover); }
+  button:disabled { opacity: 0.4; pointer-events: none; }
+  .hint { text-align: center; color: var(--text-tertiary); font-size: 12px; padding-bottom: 10px; }
+</style>
+</head>
+<body>
+<div class="widget">
+  <div class="head">
+    <span class="brand-serif">ODW Desk<span class="dot">.</span></span>
+    <span class="state" id="state"><span class="led"></span><span id="state-text">connecting</span></span>
+  </div>
+  <div id="log"></div>
+  <form id="form">
+    <input id="text" placeholder="Type a message…" autocomplete="off" />
+    <button id="send">Send</button>
+  </form>
+  <div class="hint">Visitor chat over WebSocket — AI answers from the configured local model; agents can take over from the <a href="/console">inbox</a>.</div>
+</div>
+
+<script>
+const log = document.getElementById('log');
+const stateEl = document.getElementById('state');
+const stateText = document.getElementById('state-text');
+const visitorId = 'widget-' + Math.random().toString(36).slice(2, 10);
+
+function setState(cls, text) { stateEl.className = 'state ' + cls; stateText.textContent = text; }
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function add(kind, text) {
+  const el = document.createElement('div');
+  el.className = 'bubble ' + kind;
+  el.innerHTML = esc(text);
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
+function wsUrl() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${proto}://${location.host}/ws/chat/${visitorId}`;
+}
+let ws = null;
+function connect() {
+  setState('', 'connecting');
+  ws = new WebSocket(wsUrl());
+  ws.onopen = () => add('sys', `session ${visitorId}`);
+  ws.onerror = () => setState('err', 'error');
+  ws.onclose = () => { setState('err', 'disconnected'); setTimeout(connect, 3000); };
+  ws.onmessage = (ev) => {
+    let frame; try { frame = JSON.parse(ev.data); } catch { add('sys', ev.data.slice(0, 120)); return; }
+    switch (frame.type) {
+      case 'connected':
+        setState('on', 'online');
+        add('sys', 'Connected — say hello, the agent will pick it up.');
+        break;
+      case 'routed':
+        add('sys', `Queued · conversation ${String(frame.conversation_id || '').slice(0, 8)}`);
+        break;
+      case 'read_ack':
+        add('sys', '✓ read');
+        break;
+      default: {
+        // AI / agent replies arrive as message-like frames
+        const text = frame.content || frame.text || frame.message;
+        if (text) add('them', text);
+        else add('sys', `frame: ${esc(frame.type)}`);
+      }
+    }
+  };
+}
+document.getElementById('form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const input = document.getElementById('text');
+  const text = input.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'message', content: text }));
+  add('me', text);
+  input.value = '';
+});
+connect();
+</script>
+</body>
+</html>

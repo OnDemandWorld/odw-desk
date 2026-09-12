@@ -271,6 +271,28 @@ async def mark_message_read(db: Any, message_id: str) -> Message | None:
     return message
 
 
+def parse_message_frame(raw: str) -> str | None:
+    """
+    Parse an inbound structured chat frame, returning the message text.
+
+    Webchat clients (including the bundled ``/console/webchat`` widget) commonly
+    send ``{"type": "message", "content": "…"}``. Without this parser the whole
+    JSON string was stored as the message content and echoed back verbatim by
+    the AI — found via browser testing of the console (2026-09-12). Plain text
+    and non-message JSON return None so the caller uses the raw frame as text.
+    """
+    try:
+        frame = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(frame, dict):
+        return None
+    if str(frame.get("type") or "").lower() != "message":
+        return None
+    content = frame.get("content")
+    return content if isinstance(content, str) and content.strip() else None
+
+
 def parse_media_frame(raw: str) -> dict[str, Any] | None:
     """
     Parse an inbound rich-media frame, returning normalized metadata or None.
@@ -436,6 +458,9 @@ async def webchat_endpoint(websocket: WebSocket, visitor_id: str) -> None:
                     continue
 
                 media = parse_media_frame(text)
+                # Structured chat frames carry the text in `content`; storing
+                # the raw JSON string polluted the inbox and the AI echo.
+                message_text = parse_message_frame(text) if media is None else None
                 async with AsyncSessionLocal() as db:
                     try:
                         if media is not None:
@@ -443,7 +468,10 @@ async def webchat_endpoint(websocket: WebSocket, visitor_id: str) -> None:
                             result = await route_inbound_message(inbound, db, get_event_bus())
                         else:
                             result = await route_webchat_message(
-                                visitor_id, text, db, get_event_bus()
+                                visitor_id,
+                                message_text if message_text is not None else text,
+                                db,
+                                get_event_bus(),
                             )
                         # Persist the routed customer/conversation/message. The
                         # raw AsyncSessionLocal() (unlike the get_db dependency)

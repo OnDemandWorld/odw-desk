@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ODW Desk — Agent Inbox</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  /* ODW.ai brand tokens — mirrors odw-vault/ui/gradio_app.py */
+  :root {
+    --bg-app: #F6F2EC; --bg-primary: #FFFFFF; --bg-secondary: #ECE6DC;
+    --text-primary: #14110F; --text-secondary: #2A2622; --text-tertiary: #5A544E;
+    --border-default: #D6CFC0; --border-subtle: rgba(20,17,15,0.08);
+    --accent: #FF5A1F; --accent-hover: #E04A12; --accent-subtle: #FFE9DF; --accent-fg: #14110F;
+    --success: #1F7A4D; --error: #DC4B5C; --warning: #B58900;
+    --font-display: "Instrument Serif", "Times New Roman", serif;
+    --font-sans: "Inter", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", "SF Mono", monospace;
+    --radius-sm: 6px; --radius-md: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg-app: #14110F; --bg-primary: #1C1815; --bg-secondary: #262019;
+      --text-primary: #F6F2EC; --text-secondary: #D6CFC4; --text-tertiary: #A8A096;
+      --border-default: #3A322B; --border-subtle: rgba(246,242,236,0.08);
+      --accent-subtle: rgba(255,90,31,0.16);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg-app); color: var(--text-primary); font-family: var(--font-sans); }
+  button { font-family: inherit; cursor: pointer; }
+  .app { display: grid; grid-template-columns: 320px 1fr; grid-template-rows: 56px 1fr; height: 100vh; }
+  header { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; padding: 0 20px;
+           border-bottom: 1px solid var(--border-default); background: var(--bg-primary); }
+  .wordmark { font-family: var(--font-display); font-size: 24px; letter-spacing: -0.02em; }
+  .wordmark .dot { color: var(--accent); }
+  .subtitle { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-tertiary); }
+  .header-actions { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+  .header-actions a { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); text-decoration: none; }
+  .header-actions a:hover { color: var(--accent); }
+  aside { border-right: 1px solid var(--border-default); background: var(--bg-primary); overflow-y: auto; }
+  .conv-item { padding: 12px 16px; border-bottom: 1px solid var(--border-subtle); cursor: pointer; }
+  .conv-item:hover { background: var(--bg-app); }
+  .conv-item.active { background: var(--accent-subtle); box-shadow: inset 3px 0 0 var(--accent); }
+  .conv-channel { font-family: var(--font-mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-tertiary); }
+  .conv-status { float: right; font-family: var(--font-mono); font-size: 10.5px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border-subtle); background: var(--bg-secondary); }
+  .conv-status.open { color: var(--warning); } .conv-status.resolved { color: var(--success); } .conv-status.active { color: var(--success); }
+  .conv-id { font-size: 12.5px; color: var(--text-secondary); margin-top: 4px; font-family: var(--font-mono); }
+  main { display: flex; flex-direction: column; min-width: 0; }
+  #banner { display: none; padding: 8px 20px; background: rgba(220,75,92,0.12); color: var(--error);
+            font-size: 13px; border-bottom: 1px solid var(--border-subtle); }
+  #thread { flex: 1; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 68%; padding: 10px 14px; border-radius: var(--radius-md); font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+  .msg .meta { display: block; margin-top: 4px; font-family: var(--font-mono); font-size: 10px; opacity: 0.65; }
+  .msg.visitor { align-self: flex-start; background: var(--bg-primary); border: 1px solid var(--border-default); }
+  .msg.agent { align-self: flex-end; background: var(--accent-subtle); border: 1px solid var(--border-subtle); }
+  .msg.ai { align-self: flex-end; background: var(--bg-secondary); }
+  .empty { margin: auto; text-align: center; color: var(--text-tertiary); }
+  .empty .brand-serif { font-family: var(--font-display); font-size: 34px; color: var(--text-primary); }
+  .composer { display: flex; gap: 10px; padding: 14px 20px; border-top: 1px solid var(--border-default); background: var(--bg-primary); }
+  .composer textarea { flex: 1; resize: none; height: 44px; padding: 11px 14px; border-radius: var(--radius-sm);
+                       border: 1px solid var(--border-default); background: var(--bg-app); color: var(--text-primary); font-family: inherit; font-size: 14px; }
+  .btn { padding: 10px 16px; border-radius: var(--radius-sm); border: 1px solid var(--border-default);
+         background: var(--bg-primary); color: var(--text-primary); font-size: 13px; font-weight: 600; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  .btn.primary:hover { background: var(--accent-hover); }
+  .btn:hover { border-color: var(--accent); }
+  .btn:disabled { opacity: 0.4; pointer-events: none; }
+  .toolbar { display: flex; gap: 8px; padding: 10px 20px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-primary); }
+  /* login gate */
+  #gate { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--bg-app); z-index: 10; }
+  .gate-card { background: var(--bg-primary); border: 1px solid var(--border-default); border-radius: var(--radius-md);
+               padding: 32px; width: 380px; box-shadow: 0 8px 24px -16px rgba(20,17,15,0.25); }
+  .gate-card h1 { font-family: var(--font-display); font-weight: 400; font-size: 30px; margin: 0 0 4px; }
+  .gate-card h1 span { color: var(--accent); }
+  .gate-card p { color: var(--text-tertiary); font-size: 13px; margin: 0 0 18px; }
+  .gate-card label { display: block; font-family: var(--font-mono); font-size: 10.5px; text-transform: uppercase;
+                     letter-spacing: 0.1em; color: var(--text-tertiary); margin: 12px 0 6px; }
+  .gate-card input, .gate-card select { width: 100%; padding: 10px 12px; border: 1px solid var(--border-default);
+                                        border-radius: var(--radius-sm); background: var(--bg-app); color: var(--text-primary); font-size: 14px; }
+  .gate-card .btn { width: 100%; margin-top: 18px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div id="gate">
+  <div class="gate-card">
+    <h1>ODW Desk<span>.</span></h1>
+    <p>Agent Inbox — connect with your Desk API key to take over conversations.</p>
+    <label for="api-key">API key (DESK_API_KEY)</label>
+    <input id="api-key" type="password" placeholder="Leave empty if the API is open" />
+    <label for="role">Role</label>
+    <select id="role">
+      <option value="agent">agent</option>
+      <option value="admin">admin</option>
+    </select>
+    <button class="btn primary" id="connect-btn">Connect</button>
+  </div>
+</div>
+
+<div class="app" id="app" hidden>
+  <header>
+    <span class="wordmark">ODW Desk<span class="dot">.</span></span>
+    <span class="subtitle">Agent Inbox</span>
+    <div class="header-actions">
+      <span class="subtitle" id="agent-badge"></span>
+      <a href="/console/webchat">Open webchat demo ↗</a>
+      <button class="btn" id="logout-btn" style="padding:6px 12px">Disconnect</button>
+    </div>
+  </header>
+  <aside id="conv-list"><div class="empty"><div class="brand-serif">Loading…</div></div></aside>
+  <main>
+    <div id="banner"></div>
+    <div class="toolbar" id="toolbar" hidden>
+      <button class="btn" id="takeover-btn">Take over</button>
+      <button class="btn" id="resolve-btn">Resolve</button>
+      <span class="subtitle" id="conv-state" style="align-self:center"></span>
+    </div>
+    <div id="thread"><div class="empty"><div class="brand-serif">No conversation selected</div><p>Pick a conversation on the left.</p></div></div>
+    <div class="composer" id="composer" hidden>
+      <textarea id="reply" placeholder="Type a reply as the human agent…"></textarea>
+      <button class="btn primary" id="send-btn">Send</button>
+    </div>
+  </main>
+</div>
+
+<script>
+const API = '';
+let headers = {};
+let convs = [];
+let selectedId = null;
+let agentId = null;
+let pollTimer = null;
+
+function saveCreds(key, role) {
+  localStorage.setItem('desk-console-key', key);
+  localStorage.setItem('desk-console-role', role);
+}
+function loadCreds() {
+  return { key: localStorage.getItem('desk-console-key') || '', role: localStorage.getItem('desk-console-role') || 'agent' };
+}
+async function api(path, opts = {}) {
+  const res = await fetch(API + path, { ...opts, headers: { ...headers, ...(opts.headers || {}) } });
+  if (res.status === 401 || res.status === 403) {
+    let why = ''; try { const j = await res.json(); why = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail || j); } catch {}
+    showBanner(res.status === 401
+      ? 'Not authorized — check the API key / role, then reconnect.'
+      : `Request rejected (${res.status}): ${why || 'insufficient role / preconditions'}`);
+    throw new Error('unauthorized');
+  }
+  if (!res.ok) {
+    let detail = ''; try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch { detail = res.statusText; }
+    showBanner(`Request failed (${res.status}): ${String(detail).slice(0, 200)}`);
+    throw new Error('api');
+  }
+  return res.json();
+}
+function showBanner(text) {
+  const b = document.getElementById('banner');
+  b.textContent = text; b.style.display = 'block';
+  setTimeout(() => { b.style.display = 'none'; }, 8000);
+}
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+async function connect() {
+  const key = document.getElementById('api-key').value.trim();
+  const role = document.getElementById('role').value;
+  saveCreds(key, role);
+  headers = key ? { 'X-API-Key': key, 'X-Desk-Role': role } : {};
+  // Probe with the conversations list
+  await api('/api/v1/agents/conversations?limit=1');
+  // Default agent = first online agent (overkill-free demo default)
+  try {
+    const agents = await api('/api/v1/agents/agents');
+    const first = (agents || []).find(a => a.is_online !== false) || (agents || [])[0];
+    agentId = first ? first.id : null;
+  } catch { agentId = null; }
+  document.getElementById('agent-badge').textContent = agentId ? `acting as ${String(agentId).slice(0, 8)}…` : 'no agent seeded';
+  document.getElementById('gate').hidden = true;
+  document.getElementById('app').hidden = false;
+  await refreshList();
+  pollTimer = setInterval(refreshList, 4000);
+}
+
+async function refreshList() {
+  const list = document.getElementById('conv-list');
+  try {
+    convs = await api('/api/v1/agents/conversations?limit=50');
+  } catch { return; }
+  if (!convs.length) {
+    list.innerHTML = '<div class="empty"><div class="brand-serif">All quiet</div><p>No conversations yet. Open the webchat demo to say hello.</p></div>';
+    return;
+  }
+  list.innerHTML = convs.map(c => `
+    <div class="conv-item ${c.id === selectedId ? 'active' : ''}" data-id="${esc(c.id)}">
+      <span class="conv-channel">${esc(c.channel)}</span>
+      <span class="conv-status ${esc(c.status)}">${esc(c.status)}</span>
+      <div class="conv-id">${esc(String(c.id).slice(0, 8))} · ${esc(c.created_at || '')}</div>
+    </div>`).join('');
+  list.querySelectorAll('.conv-item').forEach(el =>
+    el.addEventListener('click', () => selectConv(el.dataset.id)));
+}
+
+async function selectConv(id) {
+  selectedId = id;
+  document.getElementById('toolbar').hidden = false;
+  document.getElementById('composer').hidden = false;
+  await refreshList();
+  await renderThread();
+}
+
+async function renderThread() {
+  if (!selectedId) return;
+  const thread = document.getElementById('thread');
+  let c;
+  try { c = await api(`/api/v1/agents/conversations/${selectedId}`); } catch { return; }
+  document.getElementById('conv-state').textContent = `status: ${c.status} · ai: ${c.ai_enabled ? 'on' : 'off'}`;
+  document.getElementById('takeover-btn').disabled = !!c.assigned_agent_id;
+  document.getElementById('resolve-btn').disabled = c.status === 'resolved';
+  const msgs = c.messages || [];
+  thread.innerHTML = msgs.length ? msgs.map(m => `
+    <div class="msg ${esc(m.sender_type)}">${esc(m.content)}
+      <span class="meta">${esc(m.sender_type)}${m.pii_detected ? ' · PII redacted' : ''} · ${esc((m.created_at || '').replace('T', ' ').slice(0, 19))}</span>
+    </div>`).join('')
+    : '<div class="empty"><div class="brand-serif">No messages yet</div></div>';
+  thread.scrollTop = thread.scrollHeight;
+}
+
+async function takeover() {
+  if (!selectedId || !agentId) { if (!agentId) showBanner('No agent id available — seed an agent first.'); return; }
+  await api(`/api/v1/agents/conversations/${selectedId}/takeover?agent_id=${agentId}`, { method: 'POST' });
+  await renderThread();
+}
+async function respond() {
+  const content = document.getElementById('reply').value.trim();
+  if (!content || !selectedId || !agentId) return;
+  await api(`/api/v1/agents/conversations/${selectedId}/respond?agent_id=${agentId}&content=${encodeURIComponent(content)}`, { method: 'POST' });
+  document.getElementById('reply').value = '';
+  await renderThread();
+}
+async function resolve() {
+  if (!selectedId || !agentId) return;
+  await api(`/api/v1/agents/conversations/${selectedId}/resolve?agent_id=${agentId}`, { method: 'POST' });
+  await renderThread();
+}
+
+document.getElementById('connect-btn').addEventListener('click', () => connect().catch(() => {}));
+document.getElementById('reply').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); respond(); } });
+document.getElementById('send-btn').addEventListener('click', () => respond().catch(() => {}));
+document.getElementById('takeover-btn').addEventListener('click', () => takeover().catch(() => {}));
+document.getElementById('resolve-btn').addEventListener('click', () => resolve().catch(() => {}));
+document.getElementById('logout-btn').addEventListener('click', () => {
+  clearInterval(pollTimer);
+  localStorage.removeItem('desk-console-key');
+  location.reload();
+});
+// Pre-fill saved creds and auto-connect on open
+(function init() {
+  const { key, role } = loadCreds();
+  document.getElementById('api-key').value = key;
+  document.getElementById('role').value = role;
+  if (key || role === 'admin') connect().catch(() => {});
+})();
+</script>
+</body>
+</html>

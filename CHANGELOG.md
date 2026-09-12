@@ -5,6 +5,26 @@ All notable changes to ODW.ai Desk will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-09-12
+
+### Changed — security (breaking for key-protected deployments relying on implicit admin)
+- **RBAC default-deny**（评审批次 A）：`desk_default_role` 默认值从 `admin` 改为 **`agent`**。
+  持有效 `DESK_API_KEY` 但未声明角色（或声明未知角色）的调用方此前会**默认获得 admin**——
+  未知角色头静默升级为管理员（100 画像 UAT 发现）。现在未知/缺失角色回退到最小权限；
+  admin 访问必须显式 `X-Desk-Role: admin` 或 JWT `role: admin`。
+  单机开发如需旧行为：设 `DESK_DEFAULT_ROLE=admin`。
+
+### Added
+- **Operator Console**（评审批次 F）：`GET /console` 坐席收件台（会话列表/接管/回复/解决/
+  审计信息，REST 轮询）与 `GET /console/webchat` 可嵌入 webchat 演示页（访客 WebSocket 客户端）。
+  零构建静态页，ODW.ai 品牌令牌，key 存 localStorage。`GET /` 现返回 console 地址。
+
+### Fixed
+- **webchat 结构化 message 帧**（浏览器级 UAT 发现）：`{"type":"message","content":"…"}` 帧
+  此前被整串存为消息内容并被 AI 回显（原始 JSON 进对话历史）。新增 `parse_message_frame`
+  提取 `content`，纯文本/媒体/已读帧行为不变（+5 单测）。
+- `alembic/env.py`：`DATABASE_URL` 环境变量优先于 alembic.ini（容器/CI 可用环境变量指向迁移库）。
+
 ## [Unreleased] - 2026-09-11
 
 ### Fixed — correctness (data loss / crash bugs)

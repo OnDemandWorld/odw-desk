@@ -79,10 +79,12 @@ class Settings(BaseSettings):
         ),
     )
     desk_default_role: Literal["admin", "agent"] = Field(
-        default="admin",
+        default="agent",
         description=(
             "Role assumed by an authenticated principal when none is supplied via "
-            "JWT claim or the X-Desk-Role header. Defaults to admin for dev single-user."
+            "JWT claim or the X-Desk-Role header. Defaults to the least-privileged "
+            "'agent' (default-deny for admin routes); set 'admin' explicitly only "
+            "for single-user dev deployments."
         ),
     )
 
