@@ -29,10 +29,16 @@ class RedisConnectionManager:
     async def connect(self) -> Redis:
         """Create or return existing Redis connection pool."""
         if self._pool is None:
+            # socket_timeout must exceed the event bus's longest blocking read
+            # (XREADGROUP block=5000ms): redis-py >= 8 defaults it to 5s, which
+            # races the server's own block expiry and makes every idle poll
+            # raise TimeoutError (processor loop flooded with errors).
             self._pool = redis.from_url(
                 str(self.settings.redis_url),
                 decode_responses=True,
                 max_connections=50,
+                socket_timeout=15.0,
+                socket_keepalive=True,
             )
         return self._pool
 

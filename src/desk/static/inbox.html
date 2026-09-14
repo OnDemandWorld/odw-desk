@@ -236,7 +236,11 @@ async function takeover() {
 async function respond() {
   const content = document.getElementById('reply').value.trim();
   if (!content || !selectedId || !agentId) return;
-  await api(`/api/v1/agents/conversations/${selectedId}/respond?agent_id=${agentId}&content=${encodeURIComponent(content)}`, { method: 'POST' });
+  await api(`/api/v1/agents/conversations/${selectedId}/respond?agent_id=${agentId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
   document.getElementById('reply').value = '';
   await renderThread();
 }

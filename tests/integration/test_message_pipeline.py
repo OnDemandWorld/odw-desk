@@ -66,10 +66,55 @@ def _truncate_tables() -> None:
 
 
 @pytest.fixture
-def client():
-    """Return a FastAPI TestClient with full lifespan."""
+def client(monkeypatch):
+    """
+    FastAPI TestClient with full lifespan, pinned to a deterministic config.
+
+    Local model + Vault endpoints point at a closed port so the pipeline
+    exercises the graceful-degradation reply regardless of services running
+    on the developer machine. A live Ollama made this test slow and flaky:
+    real generation takes far longer than any bounded wait we could assert
+    on, and its free-form answer would not match the fallback template.
+    """
+    monkeypatch.setenv("OLLAMA_ENDPOINT", "http://127.0.0.1:9")
+    monkeypatch.setenv("VAULT_URL", "http://127.0.0.1:9")
+    get_settings.cache_clear()
     with TestClient(app) as test_client:
         yield test_client
+    get_settings.cache_clear()
+
+
+async def _wait_for_messages(conversation_id, expect_ai: bool, timeout_s: float = 10.0):
+    """
+    Poll until the conversation has (or has no) AI reply, or timeout.
+
+    Replaces fixed sleeps: the pipeline is asynchronous, and a fixed window
+    is either flaky (too short) or wasteful (too long).
+    """
+    deadline = timeout_s
+    interval = 0.25
+    elapsed = 0.0
+    while elapsed < deadline:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Message)
+                .where(Message.conversation_id == conversation_id)
+                .order_by(Message.created_at)
+            )
+            messages = result.scalars().all()
+        has_ai = any(m.sender_type == "ai" for m in messages)
+        if has_ai == expect_ai or (not expect_ai and elapsed >= 2.0):
+            return messages
+        await asyncio.sleep(interval)
+        elapsed += interval
+    # last read
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Message)
+            .where(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at)
+        )
+        return result.scalars().all()
 
 
 def build_whatsapp_payload(
@@ -196,23 +241,14 @@ async def test_whatsapp_pipeline_dispatches_ai_response(client, whatsapp_payload
     )
     assert response.status_code == 200
 
-    # Allow the message processor worker to consume the event and dispatch
-    await asyncio.sleep(1.5)
-
     customer = await _get_customer_by_identifier("+5511999887766")
     assert customer is not None
 
     conversation = await _get_conversation_for_customer(customer.id)
     assert conversation is not None
 
-    # There should be at least two messages: customer + AI response
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(Message)
-            .where(Message.conversation_id == conversation.id)
-            .order_by(Message.created_at)
-        )
-        messages = result.scalars().all()
+    # Poll until the worker persists the AI reply (bounded, not a fixed sleep)
+    messages = await _wait_for_messages(conversation.id, expect_ai=True)
 
     sender_types = [m.sender_type for m in messages]
     assert "customer" in sender_types

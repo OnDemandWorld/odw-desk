@@ -7,9 +7,8 @@ Full RAG pipeline: PII detection → model routing → Vault retrieval → LLM i
 
 from dataclasses import dataclass
 
-from sqlalchemy import select
-
 import structlog
+from sqlalchemy import select
 
 from desk.ai.confidence_scorer import ConfidenceScore, ConfidenceScorer
 from desk.ai.model_router import ModelTarget, RoutingDecision, get_model_router
@@ -23,8 +22,8 @@ from desk.config import get_settings
 from desk.conversations.manager import ConversationManager
 from desk.conversations.state_machine import ConversationStatus
 from desk.db import AsyncSessionLocal
-from desk.models.message import Message
 from desk.i18n.service import reply_language, t
+from desk.models.message import Message
 from desk.observability.metrics import ESCALATIONS
 from desk.observability.tracing import start_span
 from desk.persona.integration import get_prompt_builder_with_persona

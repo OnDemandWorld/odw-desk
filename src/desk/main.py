@@ -7,8 +7,8 @@ Self-hosted, WhatsApp-first AI customer support agent.
 import asyncio
 import os
 from collections.abc import AsyncGenerator
-from pathlib import Path
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import structlog
 from fastapi import Depends, FastAPI
@@ -43,6 +43,7 @@ from desk.sla.checker import scan_due_conversations
 from desk.surveys.csat_api import router as csat_router
 from desk.utils.redis_client import get_redis_manager
 from desk.workers.message_processor import MessageProcessor
+
 
 def _ensure_loopback_bypasses_proxy() -> None:
     """Ensure loopback hosts bypass HTTP(S) proxies.

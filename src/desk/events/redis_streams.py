@@ -7,6 +7,8 @@ Implementation of the EventBus interface using Redis Streams.
 import json
 from typing import Any
 
+from redis import exceptions as redis_exceptions
+
 from desk.events.bus import EventBus
 from desk.utils.redis_client import RedisConnectionManager
 
@@ -77,13 +79,20 @@ class RedisStreamsEventBus(EventBus):
                     raise
 
             # Read messages
-            messages = await client.xreadgroup(
-                consumer_group,
-                consumer_name,
-                {stream: ">"},
-                count=count,
-                block=block_ms,
-            )
+            try:
+                messages = await client.xreadgroup(
+                    consumer_group,
+                    consumer_name,
+                    {stream: ">"},
+                    count=count,
+                    block=block_ms,
+                )
+            except redis_exceptions.TimeoutError:
+                # Blocking read expired with no data — an empty poll, not an
+                # outage. Return [] so the caller loops calmly (redis-py >= 8
+                # can surface the block window as a socket timeout on slow or
+                # proxied connections).
+                return []
 
             events: list[dict[str, Any]] = []
             for stream_msg in messages:

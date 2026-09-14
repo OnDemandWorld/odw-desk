@@ -287,15 +287,30 @@ async def send_agent_response(
     conversation_id: UUID,
     request: Request,
     agent_id: UUID = Query(..., description="Agent ID sending response"),
-    content: str = Query(..., description="Response content"),
+    content: str = Query(None, description="Response content (legacy; prefer JSON body)"),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
     Send a response as a human agent.
 
-    Persists the message and dispatches it to the customer over their
-    channel via the outbound dispatcher.
+    Accepts the reply as a JSON body ``{"content": "…"}`` (preferred — long
+    messages exceed URL/query limits and leak into access logs) or the legacy
+    ``?content=`` query parameter. Persists the message and dispatches it to
+    the customer over their channel via the outbound dispatcher.
     """
+    if not content:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - malformed/absent JSON -> fall through
+            body = None
+        if isinstance(body, dict) and isinstance(body.get("content"), str):
+            content = body["content"]
+    if not content or not content.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="content is required (JSON body {'content': '…'} or ?content=)",
+        )
+
     conversation_manager = ConversationManager(db)
 
     # Get conversation

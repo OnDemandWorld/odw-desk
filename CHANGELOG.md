@@ -5,6 +5,27 @@ All notable changes to ODW.ai Desk will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-09-13（复查与优化轮）
+
+### Fixed
+- **Event bus / Redis**: redis-py ≥ 8 defaults `socket_timeout` to 5s, which races the
+  processor's `XREADGROUP block=5000` — every idle poll raised `TimeoutError`
+  (processor loop flooded with errors, replies delayed). The shared pool now sets a
+  15s socket timeout + keepalive, and a blocking-read expiry is treated as an empty
+  poll instead of an outage.
+- **Agent inbox `respond`**: the reply text was carried in a URL query parameter —
+  long replies exceed URL limits and leak into access logs. The endpoint now accepts
+  a JSON body `{"content": "…"}` (query parameter kept for backward compatibility;
+  the bundled console switched to the body). Verified live with a ~6,000-char reply.
+
+### Changed — tests
+- **Pipeline integration test determinism**: `test_whatsapp_pipeline_dispatches_ai_response`
+  asserted the graceful-degradation reply but ran against the developer machine's real
+  Ollama (model `gemma4:latest` exists locally → reply becomes free-form and takes far
+  longer than the fixed 1.5s wait → flaky failure). The client fixture now pins the
+  local-model and Vault endpoints to a closed port, and the fixed sleep became a
+  bounded poll.
+
 ## [Unreleased] - 2026-09-12（全流程测试与验收轮）
 
 ### Fixed — PII / grounding（单项目+组合+三轮验收发现）
