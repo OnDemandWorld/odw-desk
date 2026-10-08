@@ -301,6 +301,16 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
         """
         app_secret = self.settings.whatsapp_app_secret
         if not app_secret:
+            if self.settings.environment == "production":
+                # Fail closed: an unauthenticated webhook accepts forged
+                # customer messages and can drive real WhatsApp credentials to
+                # arbitrary numbers. Development (no secret configured) keeps
+                # the historical warn-and-accept behaviour.
+                logger.error(
+                    "whatsapp_app_secret not configured in production; "
+                    "rejecting webhook (set WHATSAPP_APP_SECRET)"
+                )
+                return False
             logger.warning(
                 "whatsapp_app_secret not configured; skipping webhook signature "
                 "verification (development only — set WHATSAPP_APP_SECRET in production)"
@@ -318,7 +328,12 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
                 hashlib.sha256,
             ).hexdigest()
         )
-        return hmac.compare_digest(expected, signature)
+        # compare_digest on str raises TypeError for non-ASCII header values
+        # (an attacker-controlled input) — encode both sides to bytes.
+        try:
+            return hmac.compare_digest(expected.encode(), signature.encode())
+        except (UnicodeEncodeError, AttributeError):
+            return False
 
     def parse_inbound_message(self, payload: dict) -> list[InboundMessage]:
         """

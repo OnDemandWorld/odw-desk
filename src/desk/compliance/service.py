@@ -391,7 +391,14 @@ class ComplianceService:
         customer: Customer,
         conversations: list[Conversation],
     ) -> dict[str, int]:
-        """Replace PII with placeholders, preserving conversation structure."""
+        """Replace PII with placeholders, preserving conversation structure.
+
+        Art. 17 anonymization must remove *indirect* identifiers too:
+        ``channel_conversation_id`` holds the raw WhatsApp phone number,
+        ``channel_message_id`` embeds email Message-IDs (address + domain),
+        and ``media_urls`` point at per-customer storage paths. Leaving them
+        in place made the "anonymized" customer trivially re-identifiable.
+        """
         customer.display_name = ANONYMIZED_DISPLAY_NAME
         customer.channel_identifiers = dict.fromkeys(
             customer.channel_identifiers or {}, ANONYMIZED_IDENTIFIER
@@ -400,6 +407,7 @@ class ComplianceService:
 
         anonymized_messages = 0
         for conv in conversations:
+            conv.channel_conversation_id = f"{ANONYMIZED_IDENTIFIER}:{conv.id}"
             messages = await self._get_messages(conv.id)
             for msg in messages:
                 msg.content = ANONYMIZED_CONTENT
@@ -407,6 +415,8 @@ class ComplianceService:
                 msg.sender_id = None
                 msg.metadata_ = {}
                 msg.pii_types = []
+                msg.channel_message_id = None
+                msg.media_urls = []
                 anonymized_messages += 1
 
         await self.db.flush()

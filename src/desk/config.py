@@ -87,6 +87,14 @@ class Settings(BaseSettings):
             "for single-user dev deployments."
         ),
     )
+    desk_role_header_trusted: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the self-asserted X-Desk-Role header may grant roles for "
+            "shared-API-key principals. None = auto: trusted except in production "
+            "(a client-chosen header is not an auth boundary; use JWTs there)."
+        ),
+    )
 
     # Event Bus
     event_bus_backend: Literal["redis_streams", "nats"] = Field(
@@ -135,6 +143,15 @@ class Settings(BaseSettings):
     )
     whatsapp_business_account_id: str = Field(
         default="", description="WhatsApp business account ID"
+    )
+    email_webhook_secret: str = Field(
+        default="",
+        description=(
+            "Shared secret for the inbound email relay webhook. When set, the "
+            "relay must send X-Desk-Signature: sha256=<hex hmac of the raw body>. "
+            "Required in production (empty rejects the webhook there); optional "
+            "in development."
+        ),
     )
 
     # WhatsApp Baileys Bridge

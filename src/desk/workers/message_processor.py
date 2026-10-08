@@ -97,6 +97,22 @@ class MessageProcessor:
             # the reply is silently dropped and the event still acked.
             await self._wait_for_visible_conversation(conversation_id)
 
+            # Re-read state at processing time: a human may have taken over
+            # between routing and now. ``ai_enabled`` is flipped off by
+            # takeover — AI must not keep answering alongside the agent
+            # (racing replies with contradictory answers to the customer).
+            ai_enabled = await self._conversation_ai_enabled(conversation_id)
+            if ai_enabled is False:
+                logger.info(
+                    "Skipping AI response — conversation handled by human agent",
+                    conversation_id=conversation_id,
+                )
+                if event_id:
+                    await self.event_bus.acknowledge(
+                        "conversation.routed", "ai-processors", event_id
+                    )
+                return
+
             # Load prior turns so the LLM answers with full context.
             history = await self._load_history(conversation_id, content)
 
@@ -190,6 +206,27 @@ class MessageProcessor:
             "Conversation still invisible after commit-wait; continuing",
             conversation_id=conversation_id,
         )
+
+    async def _conversation_ai_enabled(self, conversation_id: str | None) -> bool | None:
+        """Re-read ``ai_enabled`` for a conversation.
+
+        Returns None when the id is unusable or the conversation is missing
+        (caller falls through to the existing not-found handling); False when
+        a human has taken over and AI must stay silent.
+        """
+        from uuid import UUID as UUIDType
+
+        if not conversation_id:
+            return None
+        try:
+            conv_uuid = UUIDType(str(conversation_id))
+        except (ValueError, AttributeError):
+            return None
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Conversation.ai_enabled).where(Conversation.id == conv_uuid)
+            )
+            return result.scalar_one_or_none()
 
     async def _load_history(
         self, conversation_id: str, current_content: str

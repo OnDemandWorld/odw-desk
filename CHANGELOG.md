@@ -5,6 +5,39 @@ All notable changes to ODW.ai Desk will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-10-08（上线前深度审查轮）
+
+### Fixed
+- **[P0] 入站 webhook 生产环境 fail-closed**：`WHATSAPP_APP_SECRET` 为空时验签静默放行（伪造
+  客户消息 + 借真实凭证向任意号码发信）。生产环境未配置即拒绝（401），开发环境保持
+  warn-and-accept；非 ASCII 签名头不再 TypeError→500。Email relay webhook 新增
+  `EMAIL_WEBHOOK_SECRET`（HMAC-SHA256 `X-Desk-Signature`），生产环境未配置即拒绝。
+- **[P1] `ai_enabled` 死标志**：接管后 AI 仍自动抢答（与坐席回复打架）。takeover 置
+  `ai_enabled=False`；MessageProcessor 生成前重读会话状态，人工接管中的线程跳过 AI；
+  RESOLVED/CLOSED 会话因客户新消息重开时复位 AI（新一轮由 AI 先应答）。
+- **[P1] webhook 重投递幂等**：Meta/邮件 relay 对非 2xx 重投，重试撞
+  `UNIQUE(conversation_id, channel_message_id)` → 500 → 无限重试循环。route() 先按
+  `channel_message_id` 查重，重复即幂等返回 `status=duplicate`。
+- **[P1] Presidio 同步推理阻塞事件循环**（spaCy NER 单条几十至几百 ms）：analyze/anonymize
+  移入 `asyncio.to_thread`。
+- **[P1] GDPR anonymize 残留可识别信息**：`channel_conversation_id`（WhatsApp 即手机号原文）、
+  `channel_message_id`（email Message-ID 含地址域名）、`media_urls` 一并覆写/清空。
+- **[P1] 置信度与 Vault `fused_score` 量纲错配**：RRF 排名分（好命中 ~0.03）被当 0-1 相关度
+  平均，最好情况总分 ≈0.56 < 0.6 阈值——grounding 良好的回答也被丢弃转人工（AI deflection
+  失效）。改为对本次检索集按最佳命中相对归一化。
+- **[P2] 会话生命周期**：takeover 拒绝 RESOLVED/CLOSED（此前任意状态强行拉回 ACTIVE）与
+  并发抢占（此前双坐席都 200、后写覆盖前写，现 409）；resolve 校验坐席存在与归属
+  （此前任意/不存在 agent_id 可 resolve 他人会话）。
+- **[P2] WebChat WS 连接卫生**：重连顶替时先关闭旧 socket（此前残留半开）；`disconnect`
+  校验 socket 身份（此前旧连接的断开回调会误删新连接，在线访客的回复被丢弃）。
+- **[P2] RBAC 生产加固**：`X-Desk-Role` 自证头在生产环境不再授级（共享 key 持有者不能一行
+  头提权 admin），可用 `DESK_ROLE_HEADER_TRUSTED` 显式覆盖；开发/预发行为不变。
+
+### Changed — tests
+- 250 → 271（新增 `test_review_round4_fixes.py` 21 条回归：ai_enabled ×3、路由幂等 ×2、
+  置信度标定 ×2、GDPR 匿名化 ×1、WhatsApp fail-closed ×4、Email HMAC ×3、RBAC 头信任 ×3、
+  WS 卫生 ×2、takeover 守卫 ×1）。
+
 ## [Unreleased] - 2026-09-13（复查与优化轮）
 
 ### Fixed

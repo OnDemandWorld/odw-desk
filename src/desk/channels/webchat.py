@@ -57,16 +57,37 @@ class WebChatManager:
         self.active_connections: dict[str, WebSocket] = {}
 
     async def connect(self, visitor_id: str, websocket: WebSocket) -> None:
-        """Accept and register a visitor WebSocket connection."""
+        """Accept and register a visitor WebSocket connection.
+
+        A reconnecting visitor (page refresh, second tab) displaces the old
+        socket: without closing it the stale socket lingered half-open, and
+        when it later died its ``disconnect`` deleted the NEW connection's
+        registry entry — replies to an online visitor were silently dropped.
+        """
         await websocket.accept()
+        previous = self.active_connections.get(visitor_id)
+        if previous is not None and previous is not websocket:
+            try:
+                await previous.close(code=1000)
+            except Exception:  # noqa: BLE001 - stale socket may already be dead
+                pass
         self.active_connections[visitor_id] = websocket
         logger.info("Web-chat connected", visitor_id=visitor_id)
 
-    def disconnect(self, visitor_id: str) -> None:
-        """Remove a visitor WebSocket connection."""
-        if visitor_id in self.active_connections:
-            del self.active_connections[visitor_id]
-            logger.info("Web-chat disconnected", visitor_id=visitor_id)
+    def disconnect(self, visitor_id: str, websocket: WebSocket | None = None) -> None:
+        """Remove a visitor WebSocket connection.
+
+        With ``websocket`` given, the entry is only removed when it still
+        belongs to that socket — a stale connection's teardown must not
+        evict its replacement (see connect).
+        """
+        registered = self.active_connections.get(visitor_id)
+        if registered is None:
+            return
+        if websocket is not None and registered is not websocket:
+            return
+        del self.active_connections[visitor_id]
+        logger.info("Web-chat disconnected", visitor_id=visitor_id)
 
     async def send_to_visitor(self, visitor_id: str, payload: dict[str, Any]) -> bool:
         """
@@ -488,7 +509,7 @@ async def webchat_endpoint(websocket: WebSocket, visitor_id: str) -> None:
                 await websocket.send_json({"type": "error", "message": str(exc)})
 
     except WebSocketDisconnect:
-        manager.disconnect(visitor_id)
+        manager.disconnect(visitor_id, websocket)
     except Exception as exc:  # noqa: BLE001
         logger.error("Web-chat socket error", visitor_id=visitor_id, error=str(exc))
-        manager.disconnect(visitor_id)
+        manager.disconnect(visitor_id, websocket)

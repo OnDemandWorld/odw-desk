@@ -254,6 +254,26 @@ async def take_over_conversation(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
+    # Terminal conversations cannot be taken over — RESOLVED/CLOSED have no
+    # legal transition back into the agent queue; a returning customer
+    # reopens the thread via the router instead.
+    if conversation.status in (ConversationStatus.RESOLVED, ConversationStatus.CLOSED):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Conversation is {conversation.status} and cannot be taken over",
+        )
+
+    # Concurrent-takeover race: without this check two agents both got 200
+    # and the last write silently evicted the first responder.
+    if (
+        conversation.assigned_agent_id is not None
+        and conversation.assigned_agent_id != agent_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Conversation already taken over by another agent",
+        )
+
     # Assign agent and update status
     await conversation_manager.assign_agent(conversation, agent)
 
@@ -273,7 +293,6 @@ async def take_over_conversation(
         agent_id=str(agent_id),
         agent_name=agent.display_name,
     )
-
     return {
         "success": True,
         "conversation_id": str(conversation_id),
@@ -422,11 +441,25 @@ async def resolve_conversation(
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    # The resolving agent must be a real agent that owns the conversation —
+    # previously any (even nonexistent) agent_id could resolve someone
+    # else's conversation, closing it under the real owner.
+    agent_query = select(Agent).where(Agent.id == agent_id)
+    agent_result = await db.execute(agent_query)
+    agent = agent_result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if conversation.assigned_agent_id is not None and conversation.assigned_agent_id != agent_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Agent not assigned to this conversation. Take over first.",
+        )
+
     # Transition to resolved
     await conversation_manager.update_status(
         conversation,
         ConversationStatus.RESOLVED,
-        reason=f"Resolved by agent {agent_id}",
+        reason=f"Resolved by agent {agent.display_name}",
     )
 
     await db.commit()

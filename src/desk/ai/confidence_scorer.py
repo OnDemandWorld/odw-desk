@@ -138,16 +138,25 @@ class ConfidenceScorer:
         )
 
     def _score_knowledge(self, documents: list[RetrievedDocument] | None) -> float:
-        """Score based on knowledge base relevance."""
+        """Score based on knowledge base relevance.
+
+        Vault's ``fused_score`` is an RRF rank score (a *good* hit lands
+        around 0.03), not a 0-1 relevance probability — averaging it raw put
+        even perfectly-grounded answers below the escalation threshold.
+        Normalize against the best hit in this result set (docs arrive
+        rank-ordered from Vault): best document → 1.0, the rest proportional.
+        """
         if not documents:
             return 0.3  # Neutral score if no knowledge provided
 
-        if not documents:
+        best = max(doc.score for doc in documents)
+        if best <= 0:
             return 0.0
 
-        # Average score of top documents
+        # Relative to the strongest hit — rank-based scales carry no
+        # absolute meaning, but "everything close to the best hit" does.
         avg_score = sum(doc.score for doc in documents) / len(documents)
-        return min(avg_score, 1.0)
+        return min(1.0, avg_score / best)
 
     def _score_completeness(self, response_text: str) -> float:
         """Score based on response completeness."""

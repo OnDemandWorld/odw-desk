@@ -5,6 +5,7 @@ Detects personally identifiable information (PII) in messages,
 generates redacted versions, and issues routing directives.
 """
 
+import asyncio
 import re
 from enum import StrEnum
 from typing import Any
@@ -154,9 +155,15 @@ class PIIShield:
             )
 
         try:
-            # Analyze text for PII (Presidio en recognizers + CN regex layer)
+            # Analyze text for PII (Presidio en recognizers + CN regex layer).
+            # Presidio runs spaCy NER — a synchronous CPU workload of tens to
+            # hundreds of ms per message (first call also loads the model).
+            # It must not run on the event loop: every concurrent request and
+            # WS push stalled behind it. ``asyncio.to_thread`` keeps the
+            # analyzer per-call while moving it to a worker thread.
             analyzer_results = list(
-                self.analyzer.analyze(
+                await asyncio.to_thread(
+                    self.analyzer.analyze,
                     text=text,
                     entities=self.entity_types,
                     language="en",
@@ -169,7 +176,8 @@ class PIIShield:
 
             # Anonymize/redact PII
             if pii_detected:
-                anonymizer_result = self.anonymizer.anonymize(
+                anonymizer_result = await asyncio.to_thread(
+                    self.anonymizer.anonymize,
                     text=text,
                     # analyzer vs anonymizer ship distinct RecognizerResult
                     # classes with identical shape — same objects at runtime.

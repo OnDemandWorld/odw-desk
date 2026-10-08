@@ -359,6 +359,32 @@ async def email_webhook(
     if not raw or not str(raw).strip():
         raise HTTPException(status_code=400, detail="Empty email payload")
 
+    # Inbound relays offer a signing secret for exactly this kind of endpoint;
+    # without it anyone could POST forged mail and steer conversations. HMAC
+    # is computed over the exact bytes we received, before any decoding.
+    settings = get_settings()
+    secret = settings.email_webhook_secret
+    if secret:
+        import hashlib
+        import hmac as hmac_mod
+
+        signature = request.headers.get("x-desk-signature", "")
+        raw_bytes = raw.encode() if isinstance(raw, str) else raw
+        expected = "sha256=" + hmac_mod.new(
+            secret.encode(), raw_bytes, hashlib.sha256
+        ).hexdigest()
+        try:
+            ok = hmac_mod.compare_digest(expected.encode(), signature.encode())
+        except (UnicodeEncodeError, AttributeError):
+            ok = False
+        if not ok:
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+    elif settings.environment == "production":
+        raise HTTPException(
+            status_code=401,
+            detail="Email webhook rejected: EMAIL_WEBHOOK_SECRET not configured",
+        )
+
     # Observability: count inbound mail received on this channel.
     MESSAGES_RECEIVED.labels(channel=EMAIL_CHANNEL, status="received").inc()
 

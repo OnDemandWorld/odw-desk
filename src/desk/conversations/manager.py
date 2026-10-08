@@ -82,12 +82,15 @@ class ConversationManager:
             # Customer came back: reopen finished conversations. RESOLVED →
             # ACTIVE is a state-machine transition; CLOSED allows none, but the
             # unique constraint forbids a replacement row, so the thread is
-            # force-reopened to keep customer messages flowing.
+            # force-reopened to keep customer messages flowing. Reopening also
+            # re-arms AI (the previous round ended with a human takeover that
+            # disabled it; leaving it off would leave a fresh round unanswered).
             if conversation.status in (
                 ConversationStatus.RESOLVED,
                 ConversationStatus.CLOSED,
             ):
                 conversation.status = ConversationStatus.ACTIVE
+                conversation.ai_enabled = True
                 await self.db.flush()
             return conversation
 
@@ -180,8 +183,15 @@ class ConversationManager:
         await self.db.flush()
 
     async def assign_agent(self, conversation: Conversation, agent: Agent) -> None:
-        """Assign a human agent to a conversation."""
+        """Assign a human agent to a conversation.
+
+        A human takeover disables AI auto-response for the thread (the
+        ``ai_enabled`` flag was previously never consulted anywhere — AI kept
+        answering alongside the agent after takeover). The flag is reset when
+        a resolved conversation is reopened by a new customer message.
+        """
         conversation.assigned_agent_id = agent.id
+        conversation.ai_enabled = False
         conversation.status = ConversationStatus.ESCALATED
         await self.db.flush()
 

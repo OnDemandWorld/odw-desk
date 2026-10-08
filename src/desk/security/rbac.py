@@ -18,7 +18,9 @@ Backward compatibility (mirrors ``desk.security.api_auth``):
 
 Role resolution for an authenticated principal (in priority order):
 1. ``role`` claim of a JWT bearer token (HS256, signed with ``settings.secret_key``).
-2. The explicit ``X-Desk-Role`` header (``admin`` / ``agent``).
+2. The explicit ``X-Desk-Role`` header (``admin`` / ``agent``) — honored outside
+   production, or anywhere when ``DESK_ROLE_HEADER_TRUSTED=true``. In production
+   a self-asserted header must not grant privileges for shared-key principals.
 3. ``settings.desk_default_role`` (defaults to the least-privileged ``agent``).
 
 Default-deny: an unrecognised or absent role must not escalate — the fallback is
@@ -73,6 +75,11 @@ def resolve_role(
     Resolve the effective role for an authenticated principal.
 
     Priority: JWT ``role`` claim > ``X-Desk-Role`` header > configured default.
+
+    The self-asserted header is only honored when trusted: by default it is
+    trusted everywhere EXCEPT production, where a client-chosen header must
+    not be an auth boundary (any key holder could add ``X-Desk-Role: admin``).
+    Set ``DESK_ROLE_HEADER_TRUSTED=true|false`` to override explicitly.
     """
     if authorization:
         scheme, _, token = authorization.partition(" ")
@@ -81,7 +88,12 @@ def resolve_role(
             if jwt_role:
                 return jwt_role
 
-    if desk_role and desk_role.strip().lower() in ROLE_LEVELS:
+    trust_header = (
+        settings.desk_role_header_trusted
+        if settings.desk_role_header_trusted is not None
+        else settings.environment != "production"
+    )
+    if trust_header and desk_role and desk_role.strip().lower() in ROLE_LEVELS:
         return desk_role.strip().lower()
 
     return settings.desk_default_role
