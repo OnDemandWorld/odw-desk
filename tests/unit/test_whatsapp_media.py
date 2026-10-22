@@ -82,10 +82,12 @@ class TestInboundMediaParsing:
         assert len(messages) == 1
         msg = messages[0]
         assert msg.metadata["message_type"] == "image"
-        assert msg.metadata["media_type"] == "image"
-        assert msg.metadata["media_id"] == "media-img-1"
-        assert msg.metadata["mime_type"] == "image/jpeg"
-        assert msg.metadata["caption"] == "see this"
+        # D-6: media descriptors nest under "media" (what the router persists).
+        media = msg.metadata["media"]
+        assert media["media_type"] == "image"
+        assert media["media_id"] == "media-img-1"
+        assert media["mime_type"] == "image/jpeg"
+        assert media["caption"] == "see this"
         # Caption becomes the textual content when present.
         assert msg.content == "see this"
 
@@ -98,9 +100,10 @@ class TestInboundMediaParsing:
         messages = adapter.parse_inbound_message(payload)
 
         msg = messages[0]
-        assert msg.metadata["media_id"] == "media-doc-9"
-        assert msg.metadata["mime_type"] == "application/pdf"
-        assert msg.metadata["caption"] is None
+        media = msg.metadata["media"]
+        assert media["media_id"] == "media-doc-9"
+        assert media["mime_type"] == "application/pdf"
+        assert media["caption"] is None
         assert msg.content == "[document]"
 
 
@@ -158,12 +161,13 @@ class TestSendMedia:
         args, kwargs = mock_client.post.call_args
         assert args[0] == f"{GRAPH_BASE}/1234567890/messages"
         assert kwargs["headers"]["Authorization"] == "Bearer test-token"
+        # D-21: caption nests inside the media object per the Cloud API
+        # contract (a top-level "caption" is silently dropped by Meta).
         assert kwargs["json"] == {
             "messaging_product": "whatsapp",
             "to": "+5511999887766",
             "type": "image",
-            "image": {"link": "https://cdn.invalid/x.jpg"},
-            "caption": "hi",
+            "image": {"link": "https://cdn.invalid/x.jpg", "caption": "hi"},
         }
 
     async def test_send_media_without_caption_omits_caption_key(self, monkeypatch):

@@ -21,7 +21,7 @@ logger = structlog.get_logger()
 
 
 async def scan_due_conversations(
-    db: AsyncSession, service: SLAService | None = None
+    db: AsyncSession, service: SLAService | None = None, event_bus=None
 ) -> dict:
     """
     Evaluate active conversations and escalate those in breach.
@@ -33,7 +33,9 @@ async def scan_due_conversations(
     Returns:
         Summary dict: ``{"scanned": int, "breached": int, "escalated": int}``.
     """
-    service = service or SLAService(db)
+    # D-9: the production scanner previously built SLAService without the
+    # event bus, so `sla.breach` never published (README-promised event).
+    service = service or SLAService(db, event_bus=event_bus)
 
     # Eager-load messages: the SLA evaluation reads the conversation's
     # message timestamps, and a lazy load inside this async context would

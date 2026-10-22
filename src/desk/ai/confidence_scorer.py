@@ -166,7 +166,6 @@ class ConfidenceScorer:
         # Check for completeness indicators
         text_lower = response_text.lower()
 
-        # Positive indicators
         positive_indicators = [
             "here's",
             "here is",
@@ -176,6 +175,16 @@ class ConfidenceScorer:
             "i can help",
             "the answer is",
             "to resolve",
+            # zh (D-19): Chinese replies previously always scored the 0.5 base —
+            # a V1.2 headline feature (Chinese support) systematically
+            # under-scored and over-escalated.
+            "为您",
+            "您可以",
+            "请",
+            "我来帮您",
+            "答案是",
+            "解决",
+            "您好",
         ]
         positive_count = sum(1 for ind in positive_indicators if ind in text_lower)
 
@@ -186,6 +195,12 @@ class ConfidenceScorer:
             "unfortunately",
             "i cannot",
             "unable to",
+            # zh uncertainty / refusal markers
+            "不知道",
+            "不确定",
+            "很抱歉",
+            "无法",
+            "抱歉",
         ]
         negative_count = sum(1 for ind in negative_indicators if ind in text_lower)
 

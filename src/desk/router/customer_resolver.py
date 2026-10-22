@@ -5,6 +5,7 @@ Resolves or creates customers based on channel identifiers.
 """
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from desk.models.customer import Customer
@@ -39,13 +40,19 @@ class CustomerResolver:
         Returns:
             Existing or new Customer entity
         """
-        # Query using JSONB containment
+        # Query using JSONB containment. D-14: two concurrent webhooks for a
+        # brand-new customer can BOTH miss here and each insert a row (no
+        # unique index on JSONB identifiers) — afterwards scalar_one_or_none()
+        # raised MultipleResultsFound and every future message for that
+        # customer 500'd. Take .first() of up to 2 rows instead, and on a
+        # unique-violation at flush, re-read the winner.
         result = await self.db.execute(
-            select(Customer).where(
-                Customer.channel_identifiers[channel].as_string() == identifier
-            )
+            select(Customer)
+            .where(Customer.channel_identifiers[channel].as_string() == identifier)
+            .order_by(Customer.created_at.asc())
+            .limit(2)
         )
-        customer = result.scalar_one_or_none()
+        customer = result.scalars().first()
 
         if customer is None:
             customer = Customer(
@@ -54,7 +61,19 @@ class CustomerResolver:
                 metadata_={},
             )
             self.db.add(customer)
-            await self.db.flush()
+            try:
+                await self.db.flush()
+            except IntegrityError:
+                await self.db.rollback()
+                retry = await self.db.execute(
+                    select(Customer)
+                    .where(Customer.channel_identifiers[channel].as_string() == identifier)
+                    .order_by(Customer.created_at.asc())
+                    .limit(1)
+                )
+                customer = retry.scalars().first()
+                if customer is None:
+                    raise
         elif display_name and not (customer.display_name or "").strip():
             # Contact enrichment (Chatwoot-style): adopt the channel profile
             # name (e.g. WhatsApp contact) when the customer has none yet;

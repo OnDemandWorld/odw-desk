@@ -5,14 +5,17 @@ Admin UI endpoints for brand persona and response policy management.
 """
 
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from desk.dependencies import get_db
+from desk.models.agent import Agent
+from desk.models.brand_persona import BrandPersona
 from desk.persona.service import PersonaService
 from desk.policy.engine import PolicyEngine
 
@@ -24,6 +27,113 @@ router = APIRouter(prefix="/api/v1/admin", tags=["Persona & Policy"])
 # ============================================================================
 # Brand Persona APIs (PERSONA-002)
 # ============================================================================
+
+
+class CreatePersonaRequest(BaseModel):
+    """FR-BP-01: operator-defined brand persona. Previously personas could be
+    listed/activated but never created — the table was unreachable."""
+
+    name: str = Field(min_length=1, max_length=255)
+    tone: str = Field(min_length=1, max_length=100)
+    formality_level: str = Field(default="neutral", pattern="^(casual|neutral|formal)$")
+    vocabulary_notes: str | None = None
+    dos: list[str] = Field(default_factory=list)
+    donts: list[str] = Field(default_factory=list)
+    emoji_policy: str = Field(default="moderate", pattern="^(none|minimal|moderate|liberal)$")
+    signature_phrases: list[str] | None = None
+    few_shot_examples: list[dict[str, Any]] | None = None
+    deployment_id: UUID | None = None
+
+
+@router.post("/personas", status_code=201)
+async def create_persona(
+    body: CreatePersonaRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    persona = BrandPersona(
+        deployment_id=body.deployment_id or uuid4(),
+        name=body.name,
+        tone=body.tone,
+        formality_level=body.formality_level,
+        vocabulary_notes=body.vocabulary_notes,
+        dos=body.dos,
+        donts=body.donts,
+        emoji_policy=body.emoji_policy,
+        signature_phrases=body.signature_phrases,
+        few_shot_examples=body.few_shot_examples,
+        is_active=False,
+    )
+    db.add(persona)
+    await db.commit()
+    await db.refresh(persona)
+    logger.info("Brand persona created", persona_id=str(persona.id), name=persona.name)
+    return {
+        "id": str(persona.id),
+        "name": persona.name,
+        "tone": persona.tone,
+        "is_active": persona.is_active,
+    }
+
+
+# ============================================================================
+# Agent APIs — creation (D-2): the operator console takeover flow requires an
+# Agent row; previously nothing could create one ("no agent seeded" in the
+# inbox made human takeover unusable out of the box).
+# ============================================================================
+
+
+class CreateAgentRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=255)
+    email: str = Field(min_length=5, max_length=255)
+    role: str = Field(default="agent", pattern="^(admin|agent|read_only)$")
+    user_id: UUID | None = None
+    max_concurrent_conversations: int = Field(default=5, ge=1, le=50)
+
+
+@router.post("/agents", status_code=201)
+async def create_agent(
+    body: CreateAgentRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    agent = Agent(
+        user_id=body.user_id or uuid4(),
+        display_name=body.display_name,
+        email=body.email,
+        role=body.role,
+        max_concurrent_conversations=body.max_concurrent_conversations,
+    )
+    db.add(agent)
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="An agent with that email already exists") from exc
+    await db.refresh(agent)
+    logger.info("Agent created", agent_id=str(agent.id), email=agent.email)
+    return {
+        "id": str(agent.id),
+        "display_name": agent.display_name,
+        "email": agent.email,
+        "role": agent.role,
+    }
+
+
+@router.get("/agents")
+async def list_agents(db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
+    """List human agents (id/email/name — used by the console takeover UI)."""
+    from sqlalchemy import select
+
+    result = await db.execute(select(Agent).order_by(Agent.created_at.desc()).limit(200))
+    return [
+        {
+            "id": str(a.id),
+            "display_name": a.display_name,
+            "email": a.email,
+            "role": a.role,
+            "is_online": a.is_online,
+        }
+        for a in result.scalars().all()
+    ]
 
 
 @router.get("/personas")

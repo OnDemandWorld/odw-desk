@@ -131,7 +131,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         while True:
             try:
                 async with AsyncSessionLocal() as session:
-                    summary = await scan_due_conversations(session)
+                    summary = await scan_due_conversations(session, event_bus=app.state.event_bus)
                     await session.commit()
                 if summary.get("breached"):
                     logger.info("SLA scan found breaches", **summary)
@@ -194,11 +194,12 @@ def create_app() -> FastAPI:
     # unset the dependency is a no-op, so routes stay open (backward compatible).
     # Health (/health) and webhooks (/api/v1/webhooks/*) are intentionally NOT guarded.
 
-    # RBAC (F-RBAC-Desk): role guards layered on top of the API-key guard.
-    # admin routes require admin; agent inbox routes require agent or above.
-    # Both are no-ops when DESK_API_KEY is unset (backward compatible).
-    admin_guard = [Depends(require_api_key), Depends(require_role("admin"))]
-    agent_guard = [Depends(require_api_key), Depends(require_role("agent"))]
+    # RBAC (F-RBAC-Desk): role guards authenticate the principal themselves —
+    # a valid JWT bearer OR the shared API key (D-12). Layering require_api_key
+    # in front rejected pure-JWT bearers (the token never equals the API key),
+    # making the documented JWT-only path unreachable.
+    admin_guard = [Depends(require_role("admin"))]
+    agent_guard = [Depends(require_role("agent"))]
 
     # Include routers (CORE-001, AGENT-001, etc.)
     app.include_router(whatsapp_router)

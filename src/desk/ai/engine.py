@@ -6,6 +6,7 @@ Full RAG pipeline: PII detection → model routing → Vault retrieval → LLM i
 
 
 from dataclasses import dataclass
+import hashlib
 
 import structlog
 from sqlalchemy import select
@@ -23,12 +24,14 @@ from desk.conversations.manager import ConversationManager
 from desk.conversations.state_machine import ConversationStatus
 from desk.db import AsyncSessionLocal
 from desk.i18n.service import reply_language, t
+from desk.models.ai_configuration import AIConfiguration
 from desk.models.message import Message
 from desk.observability.metrics import ESCALATIONS
 from desk.observability.tracing import start_span
 from desk.persona.integration import get_prompt_builder_with_persona
 from desk.policy.engine import PolicyEngine
 from desk.schemas.channels import OutboundMessage
+from desk.utils.encryption import FieldEncryption
 
 logger = structlog.get_logger()
 
@@ -92,6 +95,71 @@ class AIEngine:
 
         logger.info("AI Engine initialized with full RAG pipeline")
 
+        # D-4: runtime admin configuration (AIConfiguration row) is re-read
+        # with a TTL and applied when its updated_at changes — previously the
+        # admin model/threshold settings were persisted but never consumed.
+        from desk.admin.runtime_settings import TTLCache
+
+        self._runtime_cfg_cache = TTLCache(ttl_seconds=60)
+        self._applied_cfg_stamp: str | None = None
+
+    async def _refresh_runtime_config(self) -> None:
+        """Re-read the active AIConfiguration (TTL-cached) and apply changes.
+
+        Best-effort: a DB failure keeps the current providers/threshold.
+        """
+        # Test doubles build AIEngine without __init__; initialise lazily.
+        if not hasattr(self, "_runtime_cfg_cache"):
+            from desk.admin.runtime_settings import TTLCache
+
+            self._runtime_cfg_cache = TTLCache(ttl_seconds=60)
+            self._applied_cfg_stamp = None
+
+        snapshot = self._runtime_cfg_cache.get()
+        if snapshot is None:
+            try:
+                async with AsyncSessionLocal() as db:
+                    cfg = (await db.execute(select(AIConfiguration).limit(1))).scalar_one_or_none()
+                    snapshot = {
+                        "stamp": cfg.updated_at.isoformat() if cfg and cfg.updated_at else (str(cfg.id) if cfg else ""),
+                        "cfg": cfg,
+                    }
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Runtime config read failed (keeping current)", error=str(exc))
+                snapshot = {"stamp": "", "cfg": None}
+            self._runtime_cfg_cache.put(snapshot)
+
+        stamp = snapshot["stamp"]
+        if stamp == self._applied_cfg_stamp:
+            return
+        cfg = snapshot["cfg"]
+        if cfg is not None:
+            settings = get_settings()
+            if cfg.local_model_name or cfg.local_model_endpoint:
+                self.local_provider = OllamaProvider(
+                    endpoint=cfg.local_model_endpoint or settings.ollama_endpoint,
+                    model=cfg.local_model_name or settings.local_model_name,
+                )
+                logger.info(
+                    "Applied admin local-model config",
+                    model=cfg.local_model_name,
+                    endpoint=cfg.local_model_endpoint,
+                )
+            if cfg.frontier_provider == "openai" and cfg.frontier_api_key_encrypted:
+                key = FieldEncryption(
+                    hashlib.sha256(get_settings().secret_key.encode()).digest()
+                ).decrypt(bytes(cfg.frontier_api_key_encrypted).decode("ascii"))
+                self.frontier_provider = OpenAIProvider(
+                    api_key=key,
+                    model=cfg.frontier_model_name or "gpt-4o-mini",
+                )
+                logger.info("Applied admin frontier config", model=cfg.frontier_model_name)
+            if cfg.confidence_threshold:
+                self.confidence_scorer = ConfidenceScorer(
+                    escalation_threshold=cfg.confidence_threshold,
+                )
+        self._applied_cfg_stamp = stamp
+
     async def process(
         self,
         conversation_id: str,
@@ -137,6 +205,9 @@ class AIEngine:
             confidence metadata, and whether the turn was escalated.
         """
         logger.info("Processing message through AI pipeline", conversation_id=conversation_id)
+
+        # D-4: apply admin-configured model/threshold changes (TTL-cached).
+        await self._refresh_runtime_config()
 
         # V1.6 F-2 (DS3): wrap the whole pipeline in a best-effort span so the
         # request's span tree captures end-to-end AI processing time. The span
@@ -199,6 +270,41 @@ class AIEngine:
                         return AIResult(
                             text=policy_result["redirect_response"] or t("policy_block_pre", lang),
                             blocked=True,
+                        )
+
+                    if policy_result["policy_decision"] == "redirect":
+                        # Configured redirect (e.g. competitor mentions → canned
+                        # reply). Previously the decision was silently dropped
+                        # and the LLM answered freely — the guard did not guard.
+                        logger.info(
+                            "Message redirected by policy",
+                            triggers=policy_result["triggers"],
+                        )
+                        return AIResult(
+                            text=policy_result["redirect_response"] or t("policy_block_pre", lang),
+                            blocked=True,
+                        )
+
+                    if policy_result["policy_decision"] == "escalate":
+                        # FR-RP-08: policy-mandated human handoff. Reuse the
+                        # low-confidence escalation machinery with a synthetic
+                        # score so the conversation lands in the agent inbox.
+                        logger.info(
+                            "Escalating to human by policy",
+                            triggers=policy_result["triggers"],
+                        )
+                        await self._escalate_conversation(
+                            conversation_id,
+                            ConfidenceScore(
+                                score=0.0,
+                                should_escalate=True,
+                                reasoning=f"policy: {policy_result['triggers']}",
+                                factors={},
+                            ),
+                        )
+                        return AIResult(
+                            text=t("escalation_notice", lang),
+                            escalated=True,
                         )
 
                 # Step 2: Model Routing
@@ -279,6 +385,17 @@ class AIEngine:
                             routing=routing_decision.target.value,
                             blocked=True,
                         )
+
+                    # append_disclaimer policies: attach the configured
+                    # disclaimer text to the generated reply instead of
+                    # dropping it (previously the action was a no-op).
+                    disclaimers = [
+                        str(d)
+                        for d in post_policy_result.get("append_texts", [])
+                        if d
+                    ]
+                    if disclaimers:
+                        llm_response.text = llm_response.text + "\n\n" + "\n\n".join(disclaimers)
 
                 # Step 6: Confidence Scoring
                 confidence: ConfidenceScore = await self.confidence_scorer.score(

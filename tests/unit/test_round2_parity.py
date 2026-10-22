@@ -238,6 +238,8 @@ class TestCustomerNameEnrichment:
     def _resolver_db(self, existing):
         result = MagicMock()
         result.scalar_one_or_none.return_value = existing
+        # D-14 resolver hardening queries via scalars().first()
+        result.scalars.return_value.first.return_value = existing
         db = MagicMock()
         db.execute = AsyncMock(return_value=result)
         db.flush = AsyncMock()

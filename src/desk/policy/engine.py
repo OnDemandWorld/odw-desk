@@ -189,9 +189,23 @@ class PolicyEngine:
                 violations=[v["policy_name"] for v in violations],
             )
 
+        # append_disclaimer actions never block; they contribute text the
+        # caller must append to the generated reply.
+        append_texts: list[str] = []
+        for policy in policies:
+            if policy.action != "append_disclaimer":
+                continue
+            if not self._evaluate_trigger(policy, response_content, conversation_metadata):
+                continue
+            payload = policy.action_payload or {}
+            text = payload.get("disclaimer_text") or payload.get("message")
+            if text:
+                append_texts.append(str(text))
+
         return {
             "is_valid": len(violations) == 0,
             "violations": violations,
+            "append_texts": append_texts,
             "action": (
                 "block"
                 if any(

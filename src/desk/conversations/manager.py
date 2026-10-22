@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from desk.config import get_settings
 from desk.conversations.state_machine import ConversationStateMachine, ConversationStatus
 from desk.models.agent import Agent
 from desk.models.conversation import Conversation
@@ -100,7 +101,7 @@ class ConversationManager:
             channel_conversation_id=channel_conversation_id,
             status=ConversationStatus.NEW,
             ai_enabled=True,
-            confidence_threshold=0.7,
+            confidence_threshold=get_settings().confidence_threshold,
         )
         self.db.add(conversation)
         await self.db.flush()
@@ -196,10 +197,10 @@ class ConversationManager:
         await self.db.flush()
 
     async def _ensure_first_response_sla(self, conversation: Conversation) -> None:
-        """Set first-response SLA if not already set."""
+        """Set first-response SLA if not already set (D-5: honour config)."""
         if conversation.sla_first_response_due is None:
-            # Use default 10 minutes from config in real implementation
-            conversation.sla_first_response_due = datetime.now(tz=UTC) + timedelta(minutes=10)
+            minutes = get_settings().sla_first_response_minutes
+            conversation.sla_first_response_due = datetime.now(tz=UTC) + timedelta(minutes=minutes)
 
     async def _mark_resolution(self, conversation: Conversation) -> None:
         """Mark conversation as resolved and clear agent assignment."""

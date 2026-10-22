@@ -238,8 +238,14 @@ async def take_over_conversation(
     """
     conversation_manager = ConversationManager(db)
 
-    # Get conversation
-    query = select(Conversation).where(Conversation.id == conversation_id)
+    # Get conversation (D-15): row lock closes the TOCTOU window — two
+    # concurrent takeovers both passed the None check and the second commit
+    # silently evicted the first responder.
+    query = (
+        select(Conversation)
+        .where(Conversation.id == conversation_id)
+        .with_for_update()
+    )
     result = await db.execute(query)
     conversation = result.scalar_one_or_none()
 
@@ -433,8 +439,14 @@ async def resolve_conversation(
     """
     conversation_manager = ConversationManager(db)
 
-    # Get conversation
-    query = select(Conversation).where(Conversation.id == conversation_id)
+    # Get conversation (D-15): row lock closes the TOCTOU window — two
+    # concurrent takeovers both passed the None check and the second commit
+    # silently evicted the first responder.
+    query = (
+        select(Conversation)
+        .where(Conversation.id == conversation_id)
+        .with_for_update()
+    )
     result = await db.execute(query)
     conversation = result.scalar_one_or_none()
 

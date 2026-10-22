@@ -198,7 +198,9 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
             media_type: {"link": media_link},
         }
         if caption:
-            body["caption"] = caption
+            # Meta Cloud API: caption lives INSIDE the media object — a
+            # top-level "caption" field is silently dropped by the API.
+            body[media_type]["caption"] = caption
 
         logger.info(
             "Sending WhatsApp media message",
@@ -402,7 +404,11 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
                         "message_type": message_type,
                         "whatsapp_message_id": message_data.get("id", ""),
                     }
-                    metadata.update(media_metadata)
+                    # D-6: nest under "media" — the router persists
+                    # metadata["media"] verbatim; top-level fields were dropped,
+                    # losing media_id/mime/caption needed to resolve downloads.
+                    if media_metadata.get("media_id") or media_metadata.get("media_type"):
+                        metadata["media"] = media_metadata
 
                     inbound = InboundMessage(
                         message_id=message_data.get("id", ""),

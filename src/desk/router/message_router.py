@@ -7,6 +7,7 @@ Routes inbound messages to the appropriate processing pipeline.
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from desk.conversations.manager import ConversationManager
@@ -90,14 +91,26 @@ class MessageRouter:
         if media:
             persisted_metadata["media"] = media
 
-        await self.conversation_manager.add_message(
-            conversation=conversation,
-            sender_type="customer",
-            sender_id=message.sender_identifier,
-            content=message.content,
-            channel_message_id=message.message_id,
-            metadata=persisted_metadata,
-        )
+        # D-14b: the duplicate pre-check above is check-then-insert — two
+        # racing deliveries can both miss it; the UNIQUE(channel_message_id)
+        # index then turns the loser into a 500 (and another redelivery).
+        # Catch the race and report the winner's outcome instead.
+        try:
+            await self.conversation_manager.add_message(
+                conversation=conversation,
+                sender_type="customer",
+                sender_id=message.sender_identifier,
+                content=message.content,
+                channel_message_id=message.message_id,
+                metadata=persisted_metadata,
+            )
+        except IntegrityError:
+            await self.db.rollback()
+            return {
+                "customer_id": str(customer.id),
+                "conversation_id": str(conversation.id),
+                "status": "duplicate",
+            }
 
         # Publish routing event to event bus for AI processing
         await self.event_bus.publish(

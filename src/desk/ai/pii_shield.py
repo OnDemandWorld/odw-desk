@@ -145,6 +145,21 @@ class PIIShield:
         Returns:
             PIIResult with detection results, redacted text, and routing directive
         """
+        # Admin kill-switch (PUT /config/pii → system_settings): when the
+        # shield is disabled, pass text through unredacted. Previously the
+        # `pii_shield_enabled` setting existed but nothing consulted it.
+        from desk.admin.runtime_settings import get_override
+
+        pii_cfg = get_override("pii") or {}
+        if pii_cfg.get("pii_shield_enabled") is False:
+            return PIIResult(
+                original_text=text,
+                pii_detected=False,
+                pii_types=[],
+                redacted_text=text,
+                routing_directive=RoutingDirective.NO_RESTRICTION,
+            )
+
         if not text or not text.strip():
             return PIIResult(
                 original_text=text,

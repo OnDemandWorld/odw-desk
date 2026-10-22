@@ -23,6 +23,7 @@ from desk.config import get_settings
 from desk.dependencies import get_db
 from desk.models.ai_configuration import AIConfiguration
 from desk.models.audit_log import AuditLog
+from desk.admin.runtime_settings import persist as persist_runtime_setting
 from desk.security.rbac import require_role
 from desk.utils.encryption import FieldEncryption
 
@@ -31,6 +32,10 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
 
 _FRONTIER_PROVIDERS = ("openai", "anthropic")
+# anthropic is accepted at the schema level but has no provider implementation
+# in the engine (D-7) — reject loudly instead of silently degrading to the
+# local model while the admin believes they configured Claude.
+_UNSUPPORTED_PROVIDERS = ("anthropic",)
 
 
 def _deployment_uuid() -> UUID:
@@ -95,9 +100,22 @@ async def configure_vault(
     vault_url: str = Query(..., description="Vault API URL"),
     vault_api_key: str = Query(..., description="Vault API key"),
     collection_id: str = Query(..., description="Default collection ID"),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Configure Vault connection."""
-    # In production, this would update settings in database
+    """Configure Vault connection (persisted; takes effect immediately)."""
+    await persist_runtime_setting(
+        db,
+        "vault",
+        {
+            "vault_url": vault_url,
+            "vault_api_key": vault_api_key,
+            "vault_collection_id": collection_id,
+        },
+    )
+    # Drop the cached client so the next retrieval rebuilds with the override.
+    from desk.ai.vault_client import reset_vault_client
+
+    reset_vault_client()
     logger.info("Vault configured", vault_url=vault_url, collection_id=collection_id)
     return {
         "success": True,
@@ -113,12 +131,23 @@ async def configure_whatsapp(
     phone_number_id: str = Query(..., description="Phone number ID"),
     business_account_id: str = Query(..., description="Business account ID"),
     webhook_verify_token: str = Query(..., description="Webhook verify token"),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Configure WhatsApp Business API."""
+    """Configure WhatsApp Business API (persisted; channel picks it up on restart)."""
+    await persist_runtime_setting(
+        db,
+        "whatsapp",
+        {
+            "access_token": access_token,
+            "phone_number_id": phone_number_id,
+            "business_account_id": business_account_id,
+            "webhook_verify_token": webhook_verify_token,
+        },
+    )
     logger.info("WhatsApp configured", phone_number_id=phone_number_id)
     return {
         "success": True,
-        "message": "WhatsApp configuration saved",
+        "message": "WhatsApp configuration saved (applies on service restart)",
         "phone_number_id": phone_number_id,
     }
 
@@ -132,6 +161,14 @@ async def configure_ai_model(
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Configure AI model."""
+    if provider in _UNSUPPORTED_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Provider '{provider}' is not implemented yet — "
+                "use 'openai' or a local provider (ollama)."
+            ),
+        )
     # Create or update AI configuration
     query = select(AIConfiguration).limit(1)
     result = await db.execute(query)
@@ -255,17 +292,34 @@ async def get_pii_configuration() -> dict[str, Any]:
 async def update_pii_configuration(
     pii_shield_enabled: bool = Query(None),
     frontier_allowed_with_redaction: bool = Query(None),
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Update PII shield configuration."""
-    # In production, this would update settings in database
+    """Update PII shield configuration (persisted; active for new messages)."""
+    from desk.admin.runtime_settings import get_override
+
+    current = get_override("pii") or {}
+    value = {
+        "pii_shield_enabled": pii_shield_enabled
+        if pii_shield_enabled is not None
+        else current.get("pii_shield_enabled", get_settings().pii_shield_enabled),
+        "frontier_allowed_with_redaction": frontier_allowed_with_redaction
+        if frontier_allowed_with_redaction is not None
+        else current.get(
+            "frontier_allowed_with_redaction",
+            get_settings().pii_frontier_allowed_with_redaction,
+        ),
+    }
+    await persist_runtime_setting(db, "pii", value)
     logger.info(
         "PII configuration updated",
-        pii_shield_enabled=pii_shield_enabled,
-        frontier_allowed_with_redaction=frontier_allowed_with_redaction,
+        pii_shield_enabled=value["pii_shield_enabled"],
+        frontier_allowed_with_redaction=value["frontier_allowed_with_redaction"],
     )
     return {
         "success": True,
         "message": "PII configuration updated",
+        "pii_shield_enabled": value["pii_shield_enabled"],
+        "frontier_allowed_with_redaction": value["frontier_allowed_with_redaction"],
     }
 
 

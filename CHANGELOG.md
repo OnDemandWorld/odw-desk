@@ -5,6 +5,56 @@ All notable changes to ODW.ai Desk will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-10-22（第六轮深度审查）
+
+### Added
+- **`POST /api/v1/admin/agents` + `GET /api/v1/admin/agents`（D-2）**：此前没有任何
+  API 能创建 Agent 行——控制台接管开箱报 "no agent seeded"，人工接管流程不可用。
+  邮箱唯一冲突返回 409。
+- **`POST /api/v1/admin/personas`（D-2）**：FR-BP-01 落地——运营可通过 API 定义品牌
+  人格（tone/dos/donts/emoji_policy/signature_phrases/few_shot），创建后经既有
+  activate 端点启用。
+- **`system_settings` 表（D-3，迁移 a7f3c2d91e05）**：admin 运行时配置的持久化载体
+  （key → JSONB）+ 进程内覆盖缓存 + TTL 缓存工具。
+
+### Fixed
+- **[P0] 策略引擎动作接线（D-1）**：6 种动作只执行 block——`redirect`（竞品重定向，
+  US-RP-01 旗舰故事）与 `escalate`（FR-RP-08 转人工）决策被静默丢弃、LLM 照常自由
+  生成。现前置钩子返回 redirect 定制回复 / escalate 复用升级机制（会话转
+  ESCALATED + 广播坐席）；后置钩子支持 append_disclaimer 拼接免责文本。
+- **[P0] admin 配置假成功（D-3）**：`POST /setup/vault`、`/setup/whatsapp`、
+  `PUT /config/pii` 此前只打日志返回 success 零持久化。现 vault/whatsapp/pii 全部
+  落 system_settings；VaultClient 按覆盖热重建（立即生效）；PII kill-switch 在
+  analyze() 入口生效；WhatsApp 明确标注重启生效。
+- **[P1] AI 配置被引擎消费（D-4）**：`ai_configurations` 表只写不读——admin 配置的
+  模型/阈值对推理零生效。引擎每消息 TTL(60s) 快照 + updated_at 变更时重建
+  local/frontier provider 与置信度阈值（frontier key 解密复用 admin 写入的派生密钥）。
+- **[P1] SLA 首响配置化（D-5）**：硬编码 10 分钟 → settings.sla_first_response_minutes。
+- **[P1] `sla.breach` 事件发布（D-9）**：生产扫描器构造 SLAService 不带 event_bus，
+  README 承诺的事件从未发出；main.py 传入 app.state.event_bus。
+- **[P1] WhatsApp 媒体契约（D-6/D-21）**：入站媒体元数据嵌套进 metadata["media"]
+  （router 持久化路径，media_id/mime/caption 不再丢失）；出站 caption 进媒体对象
+  （顶层 caption 被 Meta 静默丢弃）。
+- **[P1] anthropic 显式拒绝（D-7）**：配置 anthropic 此前静默降级本地模型；现
+  `/setup/ai-model` 返回 400 明确 "not implemented yet — use openai or a local
+  provider"。
+- **[P2] JWT-only 认证路径（D-12）**：admin/agent 守卫链先经 require_api_key，纯 JWT
+  bearer（永不等于 API key）被 401——文档宣称的 JWT 签名认证路径不可达。守卫链
+  收敛为 require_role 单依赖（其内部完整认证 JWT 或 API key）。
+- **[P2] takeover TOCTOU（D-15）**：并发接管双 200 且后者静默驱逐前者；SELECT 加
+  with_for_update 行锁。
+- **[P2] 并发竞态（D-14）**：同一新客户两条并发 webhook 各建 Customer（此后
+  MultipleResultsFound 永久 500）——resolver 改 limit(2).first() + IntegrityError
+  回读；消息重复投递撞唯一索引返回 500 —— add_message 捕获后返回 duplicate。
+- **[P2] 中文置信度（D-19）**：完整性指标全英文短语，中文回复恒 0.5 基分易误升级；
+  补中英双语正/负向指标。
+- **[P2] 阈值一致性（D-20）**：会话创建硬编码 0.7 → settings.confidence_threshold。
+
+### Deferred（V1.7）
+- D-8 license 门控、D-10 policy_triggers 审计回填、D-11 死指标埋点、D-13 PII 按
+  message_id 回写、D-16 消费者 XAUTOCLAIM、D-17 审计链 advisory lock、D-18 死配置
+  清理——登记于根仓库 REVIEW_ROUND6_DISCUSSION.md §三。
+
 ## [Unreleased] - 2026-10-08（上线前深度审查轮）
 
 ### Fixed

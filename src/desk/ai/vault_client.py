@@ -282,6 +282,12 @@ class VaultClient:
 _vault_client: VaultClient | None = None
 
 
+def reset_vault_client() -> None:
+    """Drop the cached client so the next retrieval picks up admin overrides."""
+    global _vault_client
+    _vault_client = None
+
+
 def get_vault_client() -> VaultClient:
     """Get or create global Vault Client instance."""
     global _vault_client
@@ -289,9 +295,16 @@ def get_vault_client() -> VaultClient:
         from desk.config import get_settings
 
         settings = get_settings()
+
+        # Admin-configured override (POST /setup/vault) wins over env settings;
+        # persisted in system_settings and loaded into the process cache.
+        from desk.admin.runtime_settings import get_override
+
+        override = get_override("vault") or {}
         _vault_client = VaultClient(
-            vault_url=settings.vault_url,
-            vault_api_key=settings.vault_api_key,
-            default_collection_id=settings.vault_collection_id,
+            vault_url=override.get("vault_url") or settings.vault_url,
+            vault_api_key=override.get("vault_api_key") or settings.vault_api_key,
+            default_collection_id=override.get("vault_collection_id")
+            or settings.vault_collection_id,
         )
     return _vault_client
