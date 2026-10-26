@@ -151,9 +151,8 @@ class TestEndToEndMessageFlow:
         assert isinstance(data, list)
 
 
-@pytest.mark.e2e
 class TestAIIntelligencePipeline:
-    """E2E tests for AI intelligence pipeline components."""
+    """In-process tests for AI intelligence pipeline components (no live server)."""
 
     @pytest.mark.asyncio
     async def test_pii_shield_detection(self):

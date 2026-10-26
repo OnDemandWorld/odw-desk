@@ -86,7 +86,7 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://desk:desk@localhost:5432/desk
           REDIS_URL: redis://localhost:6379/0
-        run: pytest tests/ -v --cov=desk --cov-report=xml
+        run: pytest tests/ -v -m "not e2e" --cov=desk --cov-report=xml
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
