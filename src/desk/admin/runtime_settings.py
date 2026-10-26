@@ -22,6 +22,7 @@ from typing import Any
 
 import structlog
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from desk.models.base import Base, TimestampMixin
@@ -58,7 +59,7 @@ def set_override(key: str, value: Any) -> None:
     _overrides[key] = value
 
 
-async def persist(db, key: str, value: dict[str, Any]) -> None:
+async def persist(db: AsyncSession, key: str, value: dict[str, Any]) -> None:
     """Upsert a setting row and refresh the process-local cache."""
     from sqlalchemy import select
 
@@ -73,7 +74,7 @@ async def persist(db, key: str, value: dict[str, Any]) -> None:
     logger.info("Runtime setting persisted", key=key)
 
 
-async def load_all(db) -> dict[str, Any]:
+async def load_all(db: AsyncSession) -> dict[str, Any]:
     """Load every persisted setting into the process cache (startup)."""
     from sqlalchemy import select
 

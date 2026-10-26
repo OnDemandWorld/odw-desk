@@ -399,7 +399,7 @@ def build_audit_report_query(
     actor: str | None = None,
     action: str | None = None,
     limit: int = 1000,
-) -> Select[tuple[AuditLog]]:
+) -> Select[Any]:
     """
     Build the filtered audit-report query (P1).
 

@@ -657,7 +657,7 @@ async def list_agents(
             )
             .group_by(Conversation.assigned_agent_id)
         )
-        active_by_agent = {row[0]: row[1] for row in counts.all()}
+        active_by_agent = {row[0]: row[1] for row in counts.all() if row[0] is not None}
 
     return [
         {

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from desk.agents.websocket import broadcast_escalation
+from desk.events.bus import EventBus
 from desk.models.conversation import Conversation
 from desk.observability.metrics import ESCALATIONS
 from desk.sla.service import ACTIVE_STATUSES, SLAService, SLAStatus
@@ -21,7 +22,7 @@ logger = structlog.get_logger()
 
 
 async def scan_due_conversations(
-    db: AsyncSession, service: SLAService | None = None, event_bus=None
+    db: AsyncSession, service: SLAService | None = None, event_bus: EventBus | None = None
 ) -> dict:
     """
     Evaluate active conversations and escalate those in breach.
