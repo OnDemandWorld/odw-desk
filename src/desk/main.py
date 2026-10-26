@@ -37,7 +37,6 @@ from desk.config import get_settings
 from desk.db import AsyncSessionLocal, get_engine
 from desk.events.redis_streams import RedisStreamsEventBus
 from desk.observability.tracing import TraceIdMiddleware
-from desk.security.api_auth import require_api_key
 from desk.security.rbac import require_role
 from desk.sla.checker import scan_due_conversations
 from desk.surveys.csat_api import router as csat_router

@@ -18,12 +18,12 @@ from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.selectable import Select
 
+from desk.admin.runtime_settings import persist as persist_runtime_setting
 from desk.compliance.service import VALID_DELETE_MODES, ComplianceService
 from desk.config import get_settings
 from desk.dependencies import get_db
 from desk.models.ai_configuration import AIConfiguration
 from desk.models.audit_log import AuditLog
-from desk.admin.runtime_settings import persist as persist_runtime_setting
 from desk.security.rbac import require_role
 from desk.utils.encryption import FieldEncryption
 

@@ -5,8 +5,8 @@ Full RAG pipeline: PII detection → model routing → Vault retrieval → LLM i
 """
 
 
-from dataclasses import dataclass
 import hashlib
+from dataclasses import dataclass
 
 import structlog
 from sqlalchemy import select
