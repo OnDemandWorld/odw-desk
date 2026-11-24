@@ -217,8 +217,16 @@ class PIIShield:
             else:
                 redacted_text = text
 
-            # Determine routing directive
-            routing_directive = self._determine_routing(pii_detected)
+            # Determine routing directive. Audit #62: consume the persisted
+            # frontier_allowed_with_redaction toggle (PUT /config/pii wrote it
+            # but nothing ever read it — the admin UI lied about the state).
+            override_allow = pii_cfg.get("frontier_allowed_with_redaction")
+            routing_directive = self._determine_routing(
+                pii_detected,
+                allow_frontier_with_redaction=(
+                    bool(override_allow) if override_allow is not None else None
+                ),
+            )
 
             # Audit #57: detection coverage is English NER + CN regexes only.
             # Chinese names/addresses in mixed-language text pass undetected;
@@ -267,12 +275,16 @@ class PIIShield:
                 routing_directive=RoutingDirective.LOCAL_MODEL_ONLY,
             )
 
-    def _determine_routing(self, pii_detected: bool) -> RoutingDirective:
+    def _determine_routing(
+        self, pii_detected: bool, allow_frontier_with_redaction: bool | None = None
+    ) -> RoutingDirective:
         """
         Determine routing directive based on PII detection and configuration.
 
         Args:
             pii_detected: Whether PII was detected
+            allow_frontier_with_redaction: Runtime override (audit #62);
+                None falls back to the instance/env setting.
 
         Returns:
             RoutingDirective
@@ -281,7 +293,12 @@ class PIIShield:
             return RoutingDirective.NO_RESTRICTION
 
         # PII detected
-        if self.allow_frontier_with_redaction:
+        allow = (
+            self.allow_frontier_with_redaction
+            if allow_frontier_with_redaction is None
+            else allow_frontier_with_redaction
+        )
+        if allow:
             return RoutingDirective.REDACTED_FRONTIER_OK
         else:
             return RoutingDirective.LOCAL_MODEL_ONLY

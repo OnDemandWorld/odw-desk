@@ -271,4 +271,6 @@ async def test_whatsapp_pipeline_dispatches_ai_response(client, whatsapp_payload
 
     ai_messages = [m for m in messages if m.sender_type == "ai"]
     assert len(ai_messages) >= 1
-    assert "We'll get back to you shortly" in ai_messages[0].content
+    # Audit #59: with no reachable model provider the pipeline now escalates
+    # to a human instead of acking a canned non-answer as success.
+    assert "connect you with a human" in ai_messages[0].content

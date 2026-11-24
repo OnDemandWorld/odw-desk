@@ -71,6 +71,7 @@ class TestRuntimeConfigApplyGuard:
         engine = AIEngine.__new__(AIEngine)  # skip __init__ (PII model download)
         engine.local_provider = MagicMock(name="local")
         engine.frontier_provider = MagicMock(name="frontier")
+        engine.model_router = SimpleNamespace(frontier_enabled=True)
 
         cfg = SimpleNamespace(
             id=uuid4(),

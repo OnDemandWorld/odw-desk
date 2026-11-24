@@ -157,6 +157,12 @@ class AIEngine:
                         api_key=key,
                         model=cfg.frontier_model_name or "gpt-4o-mini",
                     )
+                    # Audit #61: keep the router in sync with the effective
+                    # admin config — it was frozen from env at first use, so
+                    # wizard-configured frontier was never routed to.
+                    self.model_router.frontier_enabled = True
+                    self.model_router.frontier_model_name = cfg.frontier_model_name or "gpt-4o-mini"
+                    self.model_router.frontier_model_endpoint = "https://api.openai.com/v1"
                     logger.info("Applied admin frontier config", model=cfg.frontier_model_name)
                 if cfg.confidence_threshold:
                     self.confidence_scorer = ConfidenceScorer(
@@ -169,6 +175,7 @@ class AIEngine:
                 )
                 # _select_provider falls back to local when frontier is None.
                 self.frontier_provider = None
+                self.model_router.frontier_enabled = False
         # Advance the stamp even on failure: retrying the same broken config
         # on every message adds latency and log spam without changing the
         # outcome. A new admin save produces a new stamp and is re-applied.
@@ -399,12 +406,36 @@ class AIEngine:
                     )
                 except Exception as e:
                     logger.error("LLM inference failed", error=str(e))
-                    # Fall back to a canned reply; metadata reflects the intended model.
-                    return AIResult(
-                        text=t("fallback_reply", lang, snippet=content[:50]),
-                        model=routing_decision.model_name,
-                        routing=routing_decision.target.value,
-                    )
+                    # Audit #59: execute the fallback chain instead of acking a
+                    # canned non-answer as success — try the local provider,
+                    # then escalate to a human if everything fails.
+                    fallback_response = None
+                    if provider is not self.local_provider:
+                        try:
+                            fallback_response = await self.local_provider.generate(llm_request)
+                            logger.info(
+                                "Local fallback inference complete",
+                                model=fallback_response.model,
+                            )
+                        except Exception as fallback_err:  # noqa: BLE001
+                            logger.error("Local fallback failed", error=str(fallback_err))
+                    if fallback_response is None:
+                        await self._escalate_conversation(
+                            conversation_id,
+                            ConfidenceScore(
+                                score=0.0,
+                                should_escalate=True,
+                                reasoning="provider_failure",
+                                factors={},
+                            ),
+                        )
+                        return AIResult(
+                            text=t("escalation_notice", lang),
+                            model=routing_decision.model_name,
+                            routing=routing_decision.target.value,
+                            escalated=True,
+                        )
+                    llm_response = fallback_response
 
                 # Step 5.5: Post-generation Policy Check
                 async with AsyncSessionLocal() as db:
