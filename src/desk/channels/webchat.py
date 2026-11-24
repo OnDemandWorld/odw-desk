@@ -155,7 +155,9 @@ class WebChatManager:
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("Web-chat send failed", visitor_id=visitor_id, error=str(exc))
-            self.disconnect(visitor_id)
+            # Audit #25: pass the failed socket so a replacement connection
+            # registered during the failed send is not evicted.
+            self.disconnect(visitor_id, websocket)
             return False
 
     async def push_reply(

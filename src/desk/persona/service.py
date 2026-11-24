@@ -27,8 +27,18 @@ class PersonaService:
         self.db = db
 
     async def get_active_persona(self) -> BrandPersona | None:
-        """Get the currently active brand persona."""
-        query = select(BrandPersona).where(BrandPersona.is_active == True).limit(1)  # noqa: E712
+        """Get the currently active brand persona.
+
+        Audit #31: deterministic ordering (most recently updated wins) so
+        multiple active rows — possible under concurrent activations until a
+        partial unique index exists — no longer yield an arbitrary persona.
+        """
+        query = (
+            select(BrandPersona)
+            .where(BrandPersona.is_active == True)  # noqa: E712
+            .order_by(BrandPersona.updated_at.desc())
+            .limit(1)
+        )
         result = await self.db.execute(query)
         return result.scalar_one_or_none()
 

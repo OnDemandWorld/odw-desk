@@ -112,14 +112,16 @@ def _websocket_authenticated(websocket: WebSocket) -> bool:
     """
     Handshake authentication for the agent WebSocket.
 
-    Mirrors the REST API-key guard: when ``DESK_API_KEY`` is unset the
-    endpoint stays open (dev / backward compatible); when set, the client must
-    present the key via ``?token=``, ``X-API-Key``, or ``Authorization: Bearer``
-    (browsers cannot set custom WS headers, hence the query param).
+    Mirrors the REST RBAC guard (audit #37): a valid JWT bearer is accepted
+    just like on REST routes — previously only the raw shared key worked, so
+    production JWT principals could use every REST endpoint but never the
+    realtime socket. When ``DESK_API_KEY`` is unset the endpoint stays open
+    only in development; staging/production require a valid JWT (audit #1).
     """
-    expected = (get_settings().desk_api_key or "").strip()
-    if not expected:
-        return True
+    from desk.security.rbac import _role_from_jwt
+
+    settings = get_settings()
+    expected = (settings.desk_api_key or "").strip()
 
     supplied = (
         websocket.query_params.get("token")
@@ -129,8 +131,20 @@ def _websocket_authenticated(websocket: WebSocket) -> bool:
     if supplied is None:
         auth = websocket.headers.get("authorization") or ""
         supplied = auth[7:].strip() if auth.lower().startswith("bearer ") else None
+
+    if not expected:
+        if settings.environment == "development":
+            return True
+        if not supplied:
+            return False
+        return _role_from_jwt(supplied, settings) is not None
+
     if not supplied:
         return False
+
+    # JWT principals authenticate by signature, exactly as on REST routes.
+    if _role_from_jwt(supplied, settings) is not None:
+        return True
 
     try:
         return hmac.compare_digest(

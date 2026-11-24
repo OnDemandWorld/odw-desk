@@ -6,11 +6,15 @@ Manages lifecycle, health checks, and event distribution for channel adapters.
 
 from typing import TYPE_CHECKING
 
+import structlog
+
 from desk.channels.base import ChannelAdapter
 from desk.events.redis_streams import RedisStreamsEventBus
 
 if TYPE_CHECKING:
     from desk.utils.redis_client import RedisConnectionManager
+
+logger = structlog.get_logger()
 
 
 class ChannelAdapterManager:
@@ -76,18 +80,35 @@ class ChannelAdapterManager:
         import asyncio
 
         async def poll_adapter(adapter: ChannelAdapter) -> None:
-            try:
-                async for message in adapter.receive():
-                    await self.event_bus.publish(
-                        "inbound.message",
-                        {
-                            "adapter_id": adapter.config.adapter_id,
-                            "message": message.model_dump(mode="json"),
-                        },
+            # Audit #27: previously 'except Exception: pass' killed the poll
+            # task silently and permanently on the first error — the adapter
+            # looked healthy while inbound messages vanished. Log, mark
+            # degraded, and restart with bounded exponential backoff.
+            backoff = 1.0
+            while True:
+                try:
+                    async for message in adapter.receive():
+                        backoff = 1.0
+                        await self.event_bus.publish(
+                            "inbound.message",
+                            {
+                                "adapter_id": adapter.config.adapter_id,
+                                "message": message.model_dump(mode="json"),
+                            },
+                        )
+                    return  # stream ended normally
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "Inbound polling failed; restarting with backoff",
+                        adapter_id=adapter.config.adapter_id,
+                        error=str(exc),
+                        backoff_seconds=backoff,
                     )
-            except Exception:
-                # Log error and allow reconnect logic to handle it
-                pass
+                    adapter.update_health("degraded", False, last_error=str(exc))
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 60.0)
 
         tasks = [
             asyncio.create_task(poll_adapter(adapter))
