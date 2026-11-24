@@ -434,7 +434,9 @@ class TestAuditWriter:
     """DB1 — the reused tamper-evident audit writer persists an AuditLog."""
 
     async def test_log_audit_event_writes_hashed_record(self):
-        db = _mock_db([_result(scalar=None)])  # no prior log -> genesis hash
+        # First execute() is the advisory chain lock (audit #39), then the
+        # head query: no prior log -> genesis hash.
+        db = _mock_db([MagicMock(), _result(scalar=None)])
 
         engine = ComplianceEngine(db)
         record = await engine.log_audit_event(

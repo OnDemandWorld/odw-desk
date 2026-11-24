@@ -165,6 +165,19 @@ class TestOtlpExporter:
     def test_posts_payload_to_endpoint(self, monkeypatch):
         post = MagicMock()
         monkeypatch.setattr(httpx, "post", post)
+
+        # Audit #51: export runs on a daemon thread; execute inline for the
+        # assertion instead of racing the thread.
+        import threading
+
+        class _InlineThread:
+            def __init__(self, target=None, args=(), daemon=None):
+                self._target, self._args = target, args
+
+            def start(self):
+                self._target(*self._args)
+
+        monkeypatch.setattr(threading, "Thread", _InlineThread)
         span = Span(name="op", trace_id="t", span_id="s", parent_id="p", sampled=True)
         span.end_time = span.start_time + 1.0
 

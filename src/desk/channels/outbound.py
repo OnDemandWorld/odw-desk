@@ -4,6 +4,8 @@ ODW.ai Desk — Outbound Dispatcher
 Routes outbound messages to the correct channel adapter and handles delivery.
 """
 
+import asyncio
+
 import structlog
 
 from desk.channels.base import ChannelAdapter, OutboundMessage
@@ -17,8 +19,13 @@ class OutboundDispatcher:
     Outbound message dispatcher.
 
     Routes outbound messages to the appropriate channel adapter based on
-    the message's channel type. Handles retry logic and delivery tracking.
+    the message's channel type. Retries transient send failures with bounded
+    exponential backoff (audit #6). Callers MUST inspect ``result["success"]``
+    — a failed delivery must not be acknowledged as done.
     """
+
+    MAX_SEND_ATTEMPTS = 3
+    RETRY_BACKOFF_SECONDS = 0.5
 
     def __init__(self, channel_manager: ChannelAdapterManager):
         self.channel_manager = channel_manager
@@ -31,7 +38,7 @@ class OutboundDispatcher:
             message: Normalized outbound message
 
         Returns:
-            Delivery result
+            Delivery result; ``success`` is False when every attempt failed.
         """
         # Find adapter by channel type
         adapter = self._find_adapter(message.channel)
@@ -47,23 +54,46 @@ class OutboundDispatcher:
                 "error": f"No adapter found for channel: {message.channel}",
             }
 
-        try:
-            result = await adapter.send(message)
-            logger.info(
-                "Outbound message dispatched",
-                channel=message.channel,
-                conversation_id=message.conversation_id,
-                result=result,
-            )
-            return result
-        except Exception as e:
-            logger.error(
-                "Failed to dispatch outbound message",
-                channel=message.channel,
-                conversation_id=message.conversation_id,
-                error=str(e),
-            )
-            return {"success": False, "error": str(e)}
+        result: dict = {"success": False, "error": "not attempted"}
+        for attempt in range(1, self.MAX_SEND_ATTEMPTS + 1):
+            try:
+                result = await adapter.send(message)
+            except Exception as e:
+                logger.error(
+                    "Failed to dispatch outbound message",
+                    channel=message.channel,
+                    conversation_id=message.conversation_id,
+                    attempt=attempt,
+                    error=str(e),
+                )
+                result = {"success": False, "error": str(e)}
+            if result.get("success"):
+                logger.info(
+                    "Outbound message dispatched",
+                    channel=message.channel,
+                    conversation_id=message.conversation_id,
+                    attempt=attempt,
+                    result=result,
+                )
+                return result
+            if attempt < self.MAX_SEND_ATTEMPTS:
+                logger.warning(
+                    "Outbound send failed; retrying",
+                    channel=message.channel,
+                    conversation_id=message.conversation_id,
+                    attempt=attempt,
+                    error=result.get("error"),
+                )
+                await asyncio.sleep(self.RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+
+        logger.error(
+            "Outbound delivery failed after all retries",
+            channel=message.channel,
+            conversation_id=message.conversation_id,
+            attempts=self.MAX_SEND_ATTEMPTS,
+            error=result.get("error"),
+        )
+        return result
 
     def _find_adapter(self, channel: str) -> ChannelAdapter | None:
         """Find a registered adapter for the given channel."""

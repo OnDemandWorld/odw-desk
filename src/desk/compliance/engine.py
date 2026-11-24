@@ -12,7 +12,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from desk.config import get_settings
@@ -65,6 +65,12 @@ class ComplianceEngine:
         Returns:
             Created AuditLog entry
         """
+        # Audit #39: serialize chain appends — without a lock, concurrent
+        # writers read the same head and fork the hash chain, breaking
+        # tamper-evidence exactly when audit volume is high. The transaction-
+        # scoped advisory lock releases automatically at commit/rollback.
+        await self.db.execute(text("SELECT pg_advisory_xact_lock(987654321)"))
+
         # Get the latest audit log entry for hash chaining
         query = select(AuditLog).order_by(AuditLog.timestamp.desc()).limit(1)
         result = await self.db.execute(query)
@@ -236,12 +242,40 @@ class ComplianceEngine:
                 details={"reason": "retention_policy", "cutoff_date": cutoff_date.isoformat()},
             )
 
+        # Audit #50: retention must also reach customer PII. Anonymize
+        # customers whose activity predates the cutoff and who have no
+        # conversations left — otherwise phone numbers/profile names persist
+        # forever with nothing left to justify retention (GDPR minimization).
+        orphan_query = select(Customer).where(
+            Customer.updated_at < cutoff_date,
+            ~select(Conversation.id).where(Conversation.customer_id == Customer.id).exists(),
+        )
+        orphans = (await self.db.execute(orphan_query)).scalars().all()
+        anonymized_count = 0
+        for customer in orphans:
+            customer.display_name = None
+            customer.channel_identifiers = {}
+            anonymized_count += 1
+            await self.log_audit_event(
+                action="anonymize",
+                actor_id="system",
+                actor_type="system",
+                resource_type="customer",
+                resource_id=str(customer.id),
+                details={"reason": "retention_policy"},
+            )
+
         await self.db.commit()
 
-        logger.info("Retention policy enforced", deleted_conversations=deleted_count)
+        logger.info(
+            "Retention policy enforced",
+            deleted_conversations=deleted_count,
+            anonymized_customers=anonymized_count,
+        )
 
         return {
             "deleted_conversations": deleted_count,
+            "anonymized_customers": anonymized_count,
             "cutoff_date": cutoff_date.isoformat(),
             "retention_days": retention_days,
         }

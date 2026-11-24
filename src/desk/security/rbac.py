@@ -10,17 +10,18 @@ routers. Two roles are modelled, ordered by privilege:
 - ``/api/v1/admin/*``  -> ``require_role("admin")``
 - ``/api/v1/agents/*`` -> ``require_role("agent")``  (agent or above)
 
-Backward compatibility (mirrors ``desk.security.api_auth``):
-- When ``DESK_API_KEY`` is unset/empty the dependency is a no-op and the routes
-  stay open (dev / existing tests).
+Authentication modes (audit #1/#15):
+- When ``DESK_API_KEY`` is unset/empty the dependency is a no-op ONLY in
+  ``development``. In staging/production a valid JWT bearer is still required
+  (fail closed — an open admin API is not a safe default).
 - When set, the request must first authenticate (same key rules as
   ``require_api_key``) and then present a sufficient role.
 
 Role resolution for an authenticated principal (in priority order):
 1. ``role`` claim of a JWT bearer token (HS256, signed with ``settings.secret_key``).
-2. The explicit ``X-Desk-Role`` header (``admin`` / ``agent``) — honored outside
-   production, or anywhere when ``DESK_ROLE_HEADER_TRUSTED=true``. In production
-   a self-asserted header must not grant privileges for shared-key principals.
+2. The explicit ``X-Desk-Role`` header (``admin`` / ``agent``) — honored only in
+   development by default, or anywhere when ``DESK_ROLE_HEADER_TRUSTED=true``.
+   A self-asserted header must not grant privileges in staging/production.
 3. ``settings.desk_default_role`` (defaults to the least-privileged ``agent``).
 
 Default-deny: an unrecognised or absent role must not escalate — the fallback is
@@ -77,8 +78,9 @@ def resolve_role(
     Priority: JWT ``role`` claim > ``X-Desk-Role`` header > configured default.
 
     The self-asserted header is only honored when trusted: by default it is
-    trusted everywhere EXCEPT production, where a client-chosen header must
-    not be an auth boundary (any key holder could add ``X-Desk-Role: admin``).
+    trusted ONLY in development (audit #15 — previously any non-production
+    environment, including internet-reachable staging, let a shared-key holder
+    escalate to admin by adding ``X-Desk-Role: admin``).
     Set ``DESK_ROLE_HEADER_TRUSTED=true|false`` to override explicitly.
     """
     if authorization:
@@ -91,7 +93,7 @@ def resolve_role(
     trust_header = (
         settings.desk_role_header_trusted
         if settings.desk_role_header_trusted is not None
-        else settings.environment != "production"
+        else settings.environment == "development"
     )
     if trust_header and desk_role and desk_role.strip().lower() in ROLE_LEVELS:
         return desk_role.strip().lower()
@@ -108,7 +110,8 @@ def require_role(min_role: str) -> Callable[..., Any]:
 
     Returns:
         An async dependency that yields the resolved role, or None when no API
-        key is configured (routes stay open).
+        key is configured AND environment is development (routes stay open).
+        In staging/production without a key, a valid JWT bearer is required.
 
     Raises:
         HTTPException: 401 when a key is configured and not presented/matched;
@@ -124,9 +127,27 @@ def require_role(min_role: str) -> Callable[..., Any]:
         settings = get_settings()
         expected_key = settings.desk_api_key
 
-        # No key configured -> routes stay open (backward compatible).
+        # No key configured: routes stay open ONLY in development (backward
+        # compatible for local dev / existing tests). In staging/production
+        # fail closed (audit #1): a valid JWT bearer is still accepted, but an
+        # unauthenticated request must never reach admin/agent endpoints.
         if not expected_key:
-            return None
+            if settings.environment == "development":
+                return None
+            candidate: str | None = None
+            if authorization:
+                scheme, _, token = authorization.partition(" ")
+                if scheme.lower() == "bearer" and token.strip():
+                    candidate = token.strip()
+            jwt_role = _role_from_jwt(candidate, settings) if candidate else None
+            if jwt_role is None:
+                raise HTTPException(status_code=401, detail="Invalid or missing API key")
+            if ROLE_LEVELS.get(jwt_role, 0) < required_level:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Role '{jwt_role}' insufficient; requires '{min_role}'",
+                )
+            return jwt_role
 
         # Authenticate via one of two principals:
         # 1. A valid JWT bearer token (authenticated by its signature; role from

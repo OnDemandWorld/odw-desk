@@ -6,6 +6,8 @@ persists the generated AI message, and dispatches outbound responses.
 """
 
 import asyncio
+import os
+import time
 from typing import Any
 
 import structlog
@@ -39,6 +41,13 @@ class MessageProcessor:
     4. Acknowledges the event on success
     """
 
+    # Recovery tuning (audit #8): claim entries idle longer than this, at
+    # most every CLAIM_INTERVAL_SECONDS; after MAX_CLAIM_ATTEMPTS claims an
+    # entry is treated as poison and dead-lettered.
+    CLAIM_MIN_IDLE_MS = 60_000
+    CLAIM_INTERVAL_SECONDS = 30.0
+    MAX_CLAIM_ATTEMPTS = 3
+
     def __init__(
         self,
         event_bus: RedisStreamsEventBus,
@@ -48,17 +57,54 @@ class MessageProcessor:
         self.event_bus = event_bus
         self.outbound_dispatcher = outbound_dispatcher
         self.ai_engine = ai_engine
+        self._claim_counts: dict[str, int] = {}
 
     async def run(self) -> None:
         """Run the message processor loop."""
         logger.info("Starting message processor worker")
+        # Unique per process so PEL ownership is attributable and claim-based
+        # recovery can identify stranded entries (audit #9).
+        consumer_name = f"processor-{os.getpid()}"
+        last_claim = 0.0
 
         while True:
             try:
+                # Audit #8: recover entries delivered to a consumer that died
+                # before acking. subscribe('>') alone never returns them.
+                now = time.monotonic()
+                if now - last_claim >= self.CLAIM_INTERVAL_SECONDS:
+                    last_claim = now
+                    claimed = await self.event_bus.claim_pending(
+                        "conversation.routed",
+                        consumer_group="ai-processors",
+                        consumer_name=consumer_name,
+                        min_idle_ms=self.CLAIM_MIN_IDLE_MS,
+                    )
+                    for message in claimed:
+                        event_id = str(message.get("event_id", ""))
+                        self._claim_counts[event_id] = self._claim_counts.get(event_id, 0) + 1
+                        if self._claim_counts[event_id] > self.MAX_CLAIM_ATTEMPTS:
+                            logger.error(
+                                "Claimed event exceeded max attempts — dead-lettering",
+                                event_id=event_id,
+                            )
+                            await self.event_bus.dead_letter(
+                                "conversation.routed",
+                                message.get("payload", {}),
+                                "max_claim_attempts_exceeded",
+                            )
+                            await self.event_bus.acknowledge(
+                                "conversation.routed", "ai-processors", event_id
+                            )
+                            self._claim_counts.pop(event_id, None)
+                            continue
+                        await self._process_message(message, from_claim=True)
+                        self._claim_counts.pop(event_id, None)
+
                 messages = await self.event_bus.subscribe(
                     "conversation.routed",
                     consumer_group="ai-processors",
-                    consumer_name="processor-1",
+                    consumer_name=consumer_name,
                     count=10,
                     block_ms=5000,
                 )
@@ -73,8 +119,16 @@ class MessageProcessor:
                 logger.error("Error in message processor loop", error=str(e))
                 await asyncio.sleep(1)
 
-    async def _process_message(self, message: dict[str, Any]) -> None:
-        """Process a single routed message."""
+    async def _process_message(
+        self, message: dict[str, Any], from_claim: bool = False
+    ) -> None:
+        """Process a single routed message.
+
+        ``from_claim`` marks events recovered from the PEL: they have already
+        been idle >= CLAIM_MIN_IDLE_MS, so a still-invisible conversation is
+        stale junk (rolled-back routing transaction) — dead-letter it instead
+        of leaving it pending to be re-claimed forever.
+        """
         event_id = message.get("event_id")
         payload = message.get("payload", {})
 
@@ -95,7 +149,28 @@ class MessageProcessor:
             # webhooks commit via get_db). Wait until the freshly routed
             # conversation is visible on this session's connection, otherwise
             # the reply is silently dropped and the event still acked.
-            await self._wait_for_visible_conversation(conversation_id)
+            if not await self._wait_for_visible_conversation(conversation_id):
+                if from_claim:
+                    # Recovered entry still invisible after the idle window:
+                    # the routing transaction rolled back — dead-letter it.
+                    logger.warning(
+                        "Claimed event has no visible conversation — dead-lettering",
+                        conversation_id=conversation_id,
+                        event_id=event_id,
+                    )
+                    await self.event_bus.dead_letter(
+                        "conversation.routed",
+                        payload,
+                        "conversation_not_visible_after_claim",
+                    )
+                    if event_id:
+                        await self.event_bus.acknowledge(
+                            "conversation.routed", "ai-processors", event_id
+                        )
+                    return
+                # Audit #43: do not run inference or ack — leave the entry
+                # pending so claim-based recovery redelivers it after commit.
+                return
 
             # Re-read state at processing time: a human may have taken over
             # between routing and now. ``ai_enabled`` is flipped off by
@@ -141,7 +216,14 @@ class MessageProcessor:
             )
 
             if outbound is not None:
-                await self.outbound_dispatcher.dispatch(outbound)
+                delivery = await self.outbound_dispatcher.dispatch(outbound)
+                if not delivery.get("success"):
+                    # Audit #6: a failed delivery must not be acked as success.
+                    # Raising routes the event to the dead-letter stream via
+                    # the failure path below instead of silently losing it.
+                    raise RuntimeError(
+                        f"Outbound delivery failed: {delivery.get('error', 'unknown error')}"
+                    )
 
             # Acknowledge event
             if event_id:
@@ -159,17 +241,21 @@ class MessageProcessor:
         except Exception as e:
             logger.error("Failed to process message", error=str(e), conversation_id=conversation_id)
             # Move the failed event to the dead-letter stream so it can be
-            # inspected and replayed instead of being silently dropped, then
-            # ack it to avoid re-processing the poison event forever.
+            # inspected and replayed instead of being silently dropped.
+            # Audit #42: ack ONLY after the DLQ write succeeded — otherwise
+            # the event stays pending for claim-based recovery (#8) instead
+            # of vanishing from both the PEL and the DLQ.
+            dlq_ok = False
             try:
                 await self.event_bus.dead_letter(
                     "conversation.routed",
                     {"event_id": event_id, "payload": payload},
                     reason=f"processing failed: {e}",
                 )
+                dlq_ok = True
             except Exception as dlq_error:  # noqa: BLE001
                 logger.error("Failed to dead-letter event", error=str(dlq_error))
-            if event_id:
+            if event_id and dlq_ok:
                 await self.event_bus.acknowledge(
                     "conversation.routed",
                     "ai-processors",
@@ -178,34 +264,39 @@ class MessageProcessor:
 
     async def _wait_for_visible_conversation(
         self, conversation_id: str | None, attempts: int = 10, delay: float = 0.2
-    ) -> None:
+    ) -> bool:
         """
         Poll until the routed conversation is committed and visible to us.
 
         The processor runs on a separate session/connection, so uncommitted
-        rows from the routing transaction are invisible. Polls for ~2s before
-        giving up (a truly bogus event still acks quickly afterwards).
+        rows from the routing transaction are invisible. Polls for ~2s.
+
+        Returns True when visible (or the id is unusable — caller handles the
+        not-found path), False when still invisible. Audit #43: on False the
+        caller must NOT ack — the entry stays pending and claim-based
+        recovery (#8) redelivers it once the routing transaction commits.
         """
         if not conversation_id:
-            return
+            return True
         from uuid import UUID as UUIDType
 
         try:
             conv_uuid = UUIDType(str(conversation_id))
         except (ValueError, AttributeError):
-            return
+            return True
         async with AsyncSessionLocal() as session:
             for _ in range(attempts):
                 result = await session.execute(
                     select(Conversation.id).where(Conversation.id == conv_uuid)
                 )
                 if result.scalar_one_or_none() is not None:
-                    return
+                    return True
                 await asyncio.sleep(delay)
         logger.warning(
-            "Conversation still invisible after commit-wait; continuing",
+            "Conversation still invisible after commit-wait; leaving pending",
             conversation_id=conversation_id,
         )
+        return False
 
     async def _conversation_ai_enabled(self, conversation_id: str | None) -> bool | None:
         """Re-read ``ai_enabled`` for a conversation.

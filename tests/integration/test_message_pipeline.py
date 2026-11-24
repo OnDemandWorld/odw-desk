@@ -38,8 +38,23 @@ def _sign_whatsapp_payload(payload: dict) -> tuple[bytes, str]:
 def clean_database():
     """Truncate all application tables before and after each integration test."""
     _truncate_tables()
+    _clear_event_streams()
     yield
     _truncate_tables()
+    _clear_event_streams()
+
+
+def _clear_event_streams() -> None:
+    """Reset Redis streams so stale PEL entries from earlier runs cannot be
+    claim-recovered into this test's processor (audit #8 recovery interaction).
+    """
+    import redis as sync_redis
+
+    client = sync_redis.from_url(str(get_settings().redis_url))
+    try:
+        client.delete("conversation.routed", "conversation.routed:dlq", "inbound.message")
+    finally:
+        client.close()
 
 
 def _truncate_tables() -> None:
@@ -256,4 +271,6 @@ async def test_whatsapp_pipeline_dispatches_ai_response(client, whatsapp_payload
 
     ai_messages = [m for m in messages if m.sender_type == "ai"]
     assert len(ai_messages) >= 1
-    assert "We'll get back to you shortly" in ai_messages[0].content
+    # Audit #59: with no reachable model provider the pipeline now escalates
+    # to a human instead of acking a canned non-answer as success.
+    assert "connect you with a human" in ai_messages[0].content

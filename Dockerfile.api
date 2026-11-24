@@ -13,11 +13,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Audit #63: bake the spaCy NER model (no runtime download / air-gap failure).
+RUN python -m spacy download en_core_web_lg
+
 # Copy application code
 COPY src ./src
 COPY alembic ./alembic
 COPY alembic.ini .
 
-# Run migrations on startup (production should use init containers)
-# For development, run uvicorn directly
-CMD ["uvicorn", "desk.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Make the desk package importable (code lives in /app/src/desk; uvicorn only
+# adds the working directory to sys.path). Mirrors the production Dockerfile.
+ENV PYTHONPATH=/app/src
+
+# Audit #64: run as a non-root user (mirrors the production Dockerfile).
+RUN useradd -m -s /bin/bash desk
+USER desk
+
+# Run migrations on startup (production should use init containers).
+# Audit #64: --reload is development-only — dev compose passes it via a
+# command override instead of baking it into the image.
+CMD ["uvicorn", "desk.main:app", "--host", "0.0.0.0", "--port", "8000"]

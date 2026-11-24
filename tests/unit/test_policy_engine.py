@@ -209,8 +209,11 @@ class TestPostGenerationHooks:
         engine = PolicyEngine(FakeDB([policy]))
         result = await engine.run_post_generation_hooks("Take a discount today", "original")
 
-        assert result["is_valid"] is False
+        # Audit #86: append_disclaimer is not a violation — a disclaimer-only
+        # match must keep is_valid True (previously False despite action=allow).
+        assert result["is_valid"] is True
         assert result["action"] == "allow"
+        assert result["violations"] == []
 
     async def test_clean_response_is_valid(self):
         policy = make_policy(

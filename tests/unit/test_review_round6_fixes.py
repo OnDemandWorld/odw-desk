@@ -241,7 +241,7 @@ class TestSetupPersistence:
         with patch("desk.ai.vault_client.reset_vault_client") as reset:
             res = client.post(
                 "/api/v1/admin/setup/vault",
-                params={"vault_url": "http://vault:8765", "vault_api_key": "", "collection_id": "c1"},
+                json={"vault_url": "http://vault:8765", "vault_api_key": "", "collection_id": "c1"},
                 headers=_auth_headers("admin"),
             )
         assert res.status_code == 200
@@ -258,7 +258,7 @@ class TestSetupPersistence:
         app.dependency_overrides[get_db] = lambda: db
         res = client.post(
             "/api/v1/admin/setup/ai-model",
-            params={"provider": "anthropic", "model_name": "claude-3.5-sonnet"},
+            json={"provider": "anthropic", "model_name": "claude-3.5-sonnet"},
             headers=_auth_headers("admin"),
         )
         assert res.status_code == 400

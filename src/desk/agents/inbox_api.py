@@ -11,6 +11,8 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
+from jose import JWTError, jwt
 from pydantic import BaseModel, Field
 from sqlalchemy import String, cast, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +20,7 @@ from sqlalchemy.orm import selectinload
 
 from desk.agents.websocket import broadcast_conversation_update
 from desk.channels.outbound import OutboundDispatcher
+from desk.config import get_settings
 from desk.conversations.manager import ConversationManager
 from desk.conversations.state_machine import ConversationStatus
 from desk.dependencies import get_db
@@ -26,6 +29,7 @@ from desk.models.conversation import Conversation
 from desk.models.customer import Customer
 from desk.models.message import Message
 from desk.schemas.channels import OutboundMessage
+from desk.security.rbac import require_role
 
 logger = structlog.get_logger()
 
@@ -34,6 +38,41 @@ logger = structlog.get_logger()
 OPEN_STATUSES = ("new", "active", "pending", "escalated")
 
 router = APIRouter(prefix="/api/v1/agents", tags=["Agent Inbox"])
+
+
+def _jwt_claims(request: Request) -> dict:
+    """Best-effort JWT claims from the Authorization header (empty when absent)."""
+    auth = request.headers.get("authorization", "")
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return {}
+    try:
+        claims: dict = jwt.decode(token.strip(), get_settings().secret_key, algorithms=["HS256"])
+        return claims
+    except JWTError:
+        return {}
+
+
+async def _acting_agent_id(request: Request, supplied: UUID, db: AsyncSession) -> UUID:
+    """
+    Bind the acting agent to the authenticated principal (audit #16).
+
+    When the request carries a JWT whose ``sub`` maps to an Agent row, that
+    agent is the actor — a client-supplied ``agent_id`` cannot impersonate
+    another agent. Shared-key principals (no JWT) keep the supplied id; the
+    shared key is a single trusted operator credential by design.
+    """
+    sub = _jwt_claims(request).get("sub")
+    if sub:
+        try:
+            user_uuid = UUID(str(sub))
+        except (ValueError, AttributeError):
+            return supplied
+        result = await db.execute(select(Agent).where(Agent.user_id == user_uuid))
+        agent = result.scalars().first()
+        if agent is not None:
+            return agent.id
+    return supplied
 
 
 @router.get("/conversations", response_model=list[dict])
@@ -228,6 +267,7 @@ async def get_conversation_detail(
 @router.post("/conversations/{conversation_id}/takeover")
 async def take_over_conversation(
     conversation_id: UUID,
+    request: Request,
     agent_id: UUID = Query(..., description="Agent ID taking over"),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -236,6 +276,7 @@ async def take_over_conversation(
 
     Transitions conversation from escalated to active and assigns to agent.
     """
+    agent_id = await _acting_agent_id(request, agent_id, db)
     conversation_manager = ConversationManager(db)
 
     # Get conversation (D-15): row lock closes the TOCTOU window — two
@@ -307,14 +348,14 @@ async def take_over_conversation(
     }
 
 
-@router.post("/conversations/{conversation_id}/respond")
+@router.post("/conversations/{conversation_id}/respond", response_model=None)
 async def send_agent_response(
     conversation_id: UUID,
     request: Request,
     agent_id: UUID = Query(..., description="Agent ID sending response"),
     content: str = Query(None, description="Response content (legacy; prefer JSON body)"),
     db: AsyncSession = Depends(get_db),
-) -> dict:
+) -> dict | JSONResponse:
     """
     Send a response as a human agent.
 
@@ -323,6 +364,7 @@ async def send_agent_response(
     ``?content=`` query parameter. Persists the message and dispatches it to
     the customer over their channel via the outbound dispatcher.
     """
+    agent_id = await _acting_agent_id(request, agent_id, db)
     if not content:
         try:
             body = await request.json()
@@ -407,6 +449,24 @@ async def send_agent_response(
                 channel=conversation.channel,
                 delivery=delivery,
             )
+            if not delivery.get("success"):
+                # Audit #6: surface delivery failure to the agent instead of
+                # reporting success while the customer never receives the reply.
+                logger.error(
+                    "Agent reply delivery failed",
+                    conversation_id=str(conversation_id),
+                    channel=conversation.channel,
+                    error=delivery.get("error"),
+                )
+                return JSONResponse(
+                    status_code=502,
+                    content={
+                        "success": False,
+                        "error": delivery.get("error", "channel delivery failed"),
+                        "message_id": str(message.id),
+                        "conversation_id": str(conversation_id),
+                    },
+                )
         else:
             logger.warning(
                 "Agent reply not dispatched: no recipient identifier for channel",
@@ -431,12 +491,14 @@ async def send_agent_response(
 @router.post("/conversations/{conversation_id}/resolve")
 async def resolve_conversation(
     conversation_id: UUID,
+    request: Request,
     agent_id: UUID = Query(..., description="Agent ID resolving"),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
     Resolve a conversation.
     """
+    agent_id = await _acting_agent_id(request, agent_id, db)
     conversation_manager = ConversationManager(db)
 
     # Get conversation (D-15): row lock closes the TOCTOU window — two
@@ -500,6 +562,9 @@ class ConversationStatusUpdate(BaseModel):
 async def update_conversation_status(
     conversation_id: UUID,
     payload: ConversationStatusUpdate,
+    request: Request,
+    agent_id: UUID | None = Query(None, description="Acting agent (required for assigned conversations)"),
+    role: str | None = Depends(require_role("agent")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
@@ -509,12 +574,26 @@ async def update_conversation_status(
     the FSM instead of ad-hoc per-action endpoints; invalid transitions are
     rejected with 400 rather than silently corrupting the lifecycle. Status
     changes are broadcast to subscribed agents over the websocket.
+
+    Audit #17: assigned conversations may only be transitioned by their
+    owning agent (or an admin principal) — previously any agent-role caller
+    could resolve/close another agent's conversation. The row is locked to
+    close the read-modify-write race against concurrent takeovers.
     """
-    result = await db.execute(select(Conversation).where(Conversation.id == conversation_id))
+    result = await db.execute(
+        select(Conversation).where(Conversation.id == conversation_id).with_for_update()
+    )
     conversation = result.scalar_one_or_none()
 
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
+
+    if conversation.assigned_agent_id is not None and role != "admin":
+        if agent_id is None or agent_id != conversation.assigned_agent_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Conversation is assigned to another agent",
+            )
 
     try:
         await ConversationManager(db).update_status(
@@ -609,10 +688,10 @@ async def provide_ai_feedback(
             detail="Feedback can only be provided on AI messages",
         )
 
-    # Update metadata with feedback
-    metadata = message.metadata_ or {}
-    metadata["agent_feedback"] = feedback
-    message.metadata_ = metadata
+    # Update metadata with feedback. Assign a NEW dict: plain JSONB does not
+    # track in-place mutation, and reassigning the same object emits no UPDATE
+    # (audit #28 — feedback was silently never persisted).
+    message.metadata_ = {**(message.metadata_ or {}), "agent_feedback": feedback}
 
     await db.commit()
 

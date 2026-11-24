@@ -77,6 +77,9 @@ jobs:
           pip install --no-deps .
           pip install pytest pytest-asyncio pytest-cov httpx
 
+      - name: Provision spaCy NER model (audit #63 — no runtime download)
+        run: python -m spacy download en_core_web_lg
+
       - name: Run migrations
         env:
           DATABASE_URL: postgresql+asyncpg://desk:desk@localhost:5432/desk

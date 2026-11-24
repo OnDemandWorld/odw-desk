@@ -140,9 +140,14 @@ class VaultClient:
         """
         collection = collection_id or self.default_collection_id
 
-        # Check cache first
+        # Check cache first. Audit #60: a cache outage must degrade to direct
+        # retrieval, never abort it (cache.get used to sit outside the try).
         cache_key = self._cache_key(collection, query, top_k)
-        cached_result = await self.cache.get(cache_key)
+        try:
+            cached_result = await self.cache.get(cache_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Vault cache read failed (querying Vault directly)", error=str(exc))
+            cached_result = None
         if cached_result is not None and isinstance(cached_result, list):
             logger.debug("Vault cache hit", query=query[:50], collection=collection)
             return [RetrievedDocument(**doc) for doc in cached_result]
@@ -198,12 +203,17 @@ class VaultClient:
             # Desk→Vault grounding permanently empty (combo test C-B03, 2026-09-12).
             # Vault already ranks and caps results (top_k) — we trust that ordering.
 
-            # Cache the results
-            await self.cache.set(
-                cache_key,
-                [doc.to_dict() for doc in documents],
-                ttl_seconds=self.cache_ttl_seconds,
-            )
+            # Cache the results. Audit #60: a failed cache WRITE must never
+            # discard successfully fetched documents (the surrounding except
+            # handlers return [] — keep this outside their blast radius).
+            try:
+                await self.cache.set(
+                    cache_key,
+                    [doc.to_dict() for doc in documents],
+                    ttl_seconds=self.cache_ttl_seconds,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Vault cache write failed (returning fetched docs)", error=str(exc))
 
             logger.info(
                 "Vault retrieval complete",

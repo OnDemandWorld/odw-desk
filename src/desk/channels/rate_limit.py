@@ -36,26 +36,64 @@ class SlidingWindowRateLimiter:
     for deterministic assertions.
     """
 
-    def __init__(self, max_requests: int, window_seconds: float = WINDOW_SECONDS) -> None:
+    def __init__(
+        self,
+        max_requests: int,
+        window_seconds: float = WINDOW_SECONDS,
+        max_keys: int = 10_000,
+    ) -> None:
         self.max_requests = max(1, max_requests)
         self.window_seconds = window_seconds
+        self.max_keys = max(1, max_keys)
         self._events: dict[str, deque[float]] = defaultdict(deque)
+        self._allows_since_sweep = 0
 
     def _prune(self, key: str, now: float) -> deque[float]:
-        """Drop events that have fallen out of the trailing window."""
-        window = self._events[key]
+        """Drop events that have fallen out of the trailing window.
+
+        Keys whose window becomes empty are evicted entirely: visitor ids are
+        attacker-controlled and unbounded, so retaining empty deques forever
+        turned the limiter itself into a memory-exhaustion vector (audit #10).
+        """
+        window = self._events.get(key)
+        if window is None:
+            return deque()
         cutoff = now - self.window_seconds
         while window and window[0] <= cutoff:
             window.popleft()
+        if not window:
+            del self._events[key]
         return window
+
+    def _sweep(self, now: float) -> None:
+        """Prune every tracked key, evicting those whose window is empty.
+
+        Per-key pruning alone cannot reclaim keys that are never revisited
+        (an attacker uses each visitor id once), so a periodic full sweep is
+        required to bound memory (audit #10).
+        """
+        for key in list(self._events):
+            self._prune(key, now)
 
     def allow(self, key: str, now: float | None = None) -> bool:
         """Return True (and record the event) when within the limit, else False."""
         timestamp = now if now is not None else time.monotonic()
+        # Amortized sweep every 1024 allows, plus a hard key cap so memory
+        # stays bounded even when every tracked key is still active.
+        self._allows_since_sweep += 1
+        if self._allows_since_sweep >= 1024 or len(self._events) >= self.max_keys:
+            self._sweep(timestamp)
+            self._allows_since_sweep = 0
         window = self._prune(key, timestamp)
         if len(window) >= self.max_requests:
             return False
         window.append(timestamp)
+        # _prune may have evicted the key; re-register the (now non-empty)
+        # window so the recorded event is not lost.
+        self._events[key] = window
+        while len(self._events) > self.max_keys:
+            # All keys active and over cap: drop the oldest-inserted key.
+            del self._events[next(iter(self._events))]
         return True
 
     def remaining(self, key: str, now: float | None = None) -> int:

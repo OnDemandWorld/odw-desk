@@ -73,7 +73,17 @@
 const log = document.getElementById('log');
 const stateEl = document.getElementById('state');
 const stateText = document.getElementById('state-text');
-const visitorId = 'widget-' + Math.random().toString(36).slice(2, 10);
+// Audit #3: visitor id + WS token are issued by the server (crypto-random id,
+// signed short-lived token) — never client-generated Math.random.
+let visitorId = null;
+let wsToken = null;
+async function startSession() {
+  const res = await fetch('/api/v1/webchat/session', { method: 'POST' });
+  if (!res.ok) throw new Error('session request failed: ' + res.status);
+  const s = await res.json();
+  visitorId = s.visitor_id;
+  wsToken = s.token;
+}
 
 function setState(cls, text) { stateEl.className = 'state ' + cls; stateText.textContent = text; }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -86,15 +96,27 @@ function add(kind, text) {
 }
 function wsUrl() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${proto}://${location.host}/ws/chat/${visitorId}`;
+  return `${proto}://${location.host}/ws/chat/${visitorId}?token=${encodeURIComponent(wsToken)}`;
 }
 let ws = null;
-function connect() {
+async function connect() {
   setState('', 'connecting');
+  try {
+    if (!visitorId || !wsToken) await startSession();
+  } catch (e) {
+    setState('err', 'session error');
+    setTimeout(connect, 3000);
+    return;
+  }
   ws = new WebSocket(wsUrl());
   ws.onopen = () => add('sys', `session ${visitorId}`);
   ws.onerror = () => setState('err', 'error');
-  ws.onclose = () => { setState('err', 'disconnected'); setTimeout(connect, 3000); };
+  ws.onclose = (ev) => {
+    // 4401 = token missing/expired: obtain a fresh session before reconnecting.
+    if (ev.code === 4401) { visitorId = null; wsToken = null; }
+    setState('err', 'disconnected');
+    setTimeout(connect, 3000);
+  };
   ws.onmessage = (ev) => {
     let frame; try { frame = JSON.parse(ev.data); } catch { add('sys', ev.data.slice(0, 120)); return; }
     switch (frame.type) {

@@ -87,7 +87,15 @@ async def submit_csat(
     Rules: the conversation must exist (404), be resolved or closed (400),
     and not already have a rating (409 — one rating per conversation).
     """
-    conversation = await _get_conversation(conversation_id, db)
+    # Audit #38: lock the row for the check-and-set — without FOR UPDATE two
+    # concurrent submissions both passed the already-rated check, and the
+    # full-dict metadata write could clobber concurrent writers (SLA/status).
+    result = await db.execute(
+        select(Conversation).where(Conversation.id == conversation_id).with_for_update()
+    )
+    conversation = result.scalar_one_or_none()
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
     if conversation.status not in RATEABLE_STATUSES:
         raise HTTPException(

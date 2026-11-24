@@ -20,6 +20,12 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+# Audit #63: bake the spaCy NER model into the image — Presidio otherwise
+# downloads ~560MB at first use, which fails outright in air-gapped
+# deployments (the sovereignty-focused target market) and crash-loops the
+# AI worker.
+RUN python -m spacy download en_core_web_lg
+
 # Stage 2: Production
 FROM python:3.14-slim as production
 
@@ -55,5 +61,9 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Expose port
 EXPOSE 8000
 
-# Run application
-CMD ["uvicorn", "desk.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+# Run application.
+# Single worker: webchat/agent WebSocket registries and runtime-settings
+# overrides are process-local, and each worker would start its own message
+# processor/SLA scanner. Scaling beyond 1 worker/replica requires a Redis
+# pub/sub delivery relay and a shared override cache first (audit #9).
+CMD ["uvicorn", "desk.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

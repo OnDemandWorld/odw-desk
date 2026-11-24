@@ -19,7 +19,9 @@ mail starts a new conversation).
 import asyncio
 import email
 import hashlib
+import json
 import smtplib
+import ssl
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -43,6 +45,10 @@ from desk.schemas.channels import InboundMessage, OutboundMessage
 logger = structlog.get_logger()
 
 EMAIL_CHANNEL: Literal["email"] = "email"
+
+# Socket timeout for SMTP connections (audit #24): every blocking phase
+# (greeting, STARTTLS, login, sendmail) fails fast instead of hanging forever.
+SMTP_TIMEOUT_SECONDS = 30
 
 # Inbound webhook relay (Mailgun routes / SendGrid inbound parse / CloudMailin
 # style). Kept under the same unguarded webhook prefix as WhatsApp.
@@ -184,10 +190,15 @@ class EmailChannel:
         return await message_router.route(inbound)
 
     def _open_smtp(self, host: str, port: int) -> Any:
-        """Open an SMTP connection via the injected factory or stdlib smtplib."""
+        """Open an SMTP connection via the injected factory or stdlib smtplib.
+
+        Audit #24: an explicit socket timeout — without one, a blackholed
+        relay blocks forever and hung sends exhaust the shared to_thread
+        executor, halting all outbound delivery.
+        """
         if self.smtp_factory is not None:
             return self.smtp_factory(host, port)
-        return smtplib.SMTP(host, port)
+        return smtplib.SMTP(host, port, timeout=SMTP_TIMEOUT_SECONDS)
 
     def send_reply(self, to: str, subject: str, body: str) -> dict:
         """
@@ -209,6 +220,21 @@ class EmailChannel:
         """
         settings = self.settings
         if not settings.email_enabled or not settings.email_smtp_host:
+            # Audit #23: never stub success while inbound mail is being
+            # accepted (production, or a configured webhook secret) — the
+            # customer would silently never receive the reply.
+            if settings.environment == "production" or settings.email_webhook_secret:
+                logger.error(
+                    "Email SMTP not configured; outbound reply FAILED",
+                    recipient=to,
+                    subject=subject,
+                )
+                return {
+                    "success": False,
+                    "stubbed": False,
+                    "message_id": None,
+                    "error": "SMTP not configured (set EMAIL_ENABLED and EMAIL_SMTP_HOST)",
+                }
             logger.warning(
                 "Email SMTP not configured; outbound reply is stubbed",
                 recipient=to,
@@ -240,7 +266,10 @@ class EmailChannel:
             smtp = self._open_smtp(settings.email_smtp_host, settings.email_smtp_port)
             try:
                 if settings.email_use_tls:
-                    smtp.starttls()
+                    # Audit #21: verify the server certificate — smtplib's
+                    # default context disables verification, exposing SMTP
+                    # credentials to MITM inside the unverified tunnel.
+                    smtp.starttls(context=ssl.create_default_context())
                 if settings.email_smtp_user:
                     smtp.login(settings.email_smtp_user, settings.email_smtp_password)
                 smtp.sendmail(mime["From"], [to], mime.as_string())
@@ -344,34 +373,19 @@ async def email_webhook(
     conversation via ``References``/``In-Reply-To``, and routed through the
     shared MessageRouter exactly like the WhatsApp/Web-chat paths.
     """
-    content_type = request.headers.get("content-type", "")
-    if content_type.startswith("application/json"):
-        try:
-            payload = await request.json()
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid JSON body") from None
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="JSON body must be an object")
-        raw: str | bytes = str(payload.get("raw") or payload.get("body") or "")
-    else:
-        raw = await request.body()
-
-    if not raw or not str(raw).strip():
-        raise HTTPException(status_code=400, detail="Empty email payload")
-
-    # Inbound relays offer a signing secret for exactly this kind of endpoint;
-    # without it anyone could POST forged mail and steer conversations. HMAC
-    # is computed over the exact bytes we received, before any decoding.
+    # Audit #22: read the exact received bytes FIRST and verify the HMAC over
+    # them for every content type. Previously the JSON-envelope path verified
+    # over the extracted 'raw' field re-encoded to UTF-8, while relays sign the
+    # full JSON body they transmit — every legitimate signed delivery 401'd.
+    body_bytes = await request.body()
     settings = get_settings()
     secret = settings.email_webhook_secret
     if secret:
-        import hashlib
         import hmac as hmac_mod
 
         signature = request.headers.get("x-desk-signature", "")
-        raw_bytes = raw.encode() if isinstance(raw, str) else raw
         expected = "sha256=" + hmac_mod.new(
-            secret.encode(), raw_bytes, hashlib.sha256
+            secret.encode(), body_bytes, hashlib.sha256
         ).hexdigest()
         try:
             ok = hmac_mod.compare_digest(expected.encode(), signature.encode())
@@ -384,6 +398,26 @@ async def email_webhook(
             status_code=401,
             detail="Email webhook rejected: EMAIL_WEBHOOK_SECRET not configured",
         )
+
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("application/json"):
+        try:
+            payload = json.loads(body_bytes)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="JSON body must be an object")
+        raw_value = payload.get("raw") or payload.get("body") or ""
+        if not isinstance(raw_value, str):
+            raise HTTPException(
+                status_code=400, detail="JSON envelope 'raw'/'body' must be a string"
+            )
+        raw: str | bytes = raw_value
+    else:
+        raw = body_bytes
+
+    if not raw or not str(raw).strip():
+        raise HTTPException(status_code=400, detail="Empty email payload")
 
     # Observability: count inbound mail received on this channel.
     MESSAGES_RECEIVED.labels(channel=EMAIL_CHANNEL, status="received").inc()

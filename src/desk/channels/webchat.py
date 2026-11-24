@@ -13,7 +13,11 @@ identifier used as both the sender identifier and the channel conversation id,
 so a returning visitor reuses the same conversation.
 """
 
+import hashlib
+import hmac
 import json
+import secrets
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -26,8 +30,10 @@ from sqlalchemy import select
 from desk.channels.base import AdapterConfig, AdapterHealthStatus, ChannelAdapter
 from desk.channels.rate_limit import get_webchat_rate_limiter
 from desk.compliance.engine import ComplianceEngine
+from desk.config import get_settings
 from desk.db import AsyncSessionLocal
 from desk.dependencies import get_event_bus
+from desk.models.conversation import Conversation
 from desk.models.message import Message
 from desk.observability.tracing import start_span
 from desk.router.message_router import MessageRouter
@@ -44,6 +50,51 @@ MEDIA_FRAME_TYPES = ("image", "file")
 
 # Inbound frame type carrying a read receipt (V1.6 F-4, DC1).
 READ_FRAME_TYPE = "read"
+
+# Audit #3: the visitor socket used to be unauthenticated — a client-chosen,
+# Math.random-based visitor id was the only credential, and connecting with a
+# known id displaced the victim's live socket and received their replies.
+# Sessions are now issued server-side: a crypto-random visitor id plus a
+# short-lived HMAC token bound to that id, required on the WS handshake.
+SESSION_TTL_SECONDS = 3600
+
+
+def _sign_visitor_token(visitor_id: str, expires: int) -> str:
+    """HMAC-SHA256 token binding visitor_id to an expiry (stateless verify)."""
+    sig = hmac.new(
+        get_settings().secret_key.encode(),
+        f"{visitor_id}.{expires}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{expires}.{sig}"
+
+
+def _verify_visitor_token(visitor_id: str, token: str | None) -> bool:
+    """Constant-time verification of the session token for this visitor id."""
+    if not token:
+        return False
+    expires_str, _, sig = token.partition(".")
+    if not sig:
+        return False
+    try:
+        expires = int(expires_str)
+    except ValueError:
+        return False
+    if expires < time.time():
+        return False
+    return hmac.compare_digest(_sign_visitor_token(visitor_id, expires), token)
+
+
+@router.post("/api/v1/webchat/session")
+async def create_webchat_session() -> dict[str, Any]:
+    """Issue a server-generated visitor id and a signed short-lived WS token."""
+    visitor_id = f"widget-{secrets.token_urlsafe(12)}"
+    expires = int(time.time()) + SESSION_TTL_SECONDS
+    return {
+        "visitor_id": visitor_id,
+        "token": _sign_visitor_token(visitor_id, expires),
+        "expires_at": expires,
+    }
 
 
 class WebChatManager:
@@ -104,7 +155,9 @@ class WebChatManager:
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("Web-chat send failed", visitor_id=visitor_id, error=str(exc))
-            self.disconnect(visitor_id)
+            # Audit #25: pass the failed socket so a replacement connection
+            # registered during the failed send is not evicted.
+            self.disconnect(visitor_id, websocket)
             return False
 
     async def push_reply(
@@ -262,18 +315,27 @@ def parse_read_frame(raw: str) -> str | None:
     return str(message_id) if message_id else None
 
 
-async def mark_message_read(db: Any, message_id: str) -> Message | None:
+async def mark_message_read(
+    db: Any, message_id: str, visitor_id: str | None = None
+) -> Message | None:
     """
     Mark a message as read by setting ``read_at`` (V1.6 F-4, DC1).
 
     Looks the message up by its channel message id first, then by primary key
     (when ``message_id`` is a UUID). Idempotent: an already-read message keeps
     its original ``read_at``. Best-effort — returns None when not found.
+
+    Audit #19: when ``visitor_id`` is given (the WS endpoint always passes it),
+    the message must belong to that visitor's own webchat conversation —
+    previously any visitor could mark any customer's message read across
+    channels, and the ack acted as a message-id existence oracle.
     """
+    # channel_message_id is unique per conversation, not globally — use
+    # first() so a duplicated id cannot raise MultipleResultsFound.
     result = await db.execute(
         select(Message).where(Message.channel_message_id == message_id)
     )
-    message: Message | None = result.scalar_one_or_none()
+    message: Message | None = result.scalars().first()
 
     if message is None:
         try:
@@ -281,10 +343,22 @@ async def mark_message_read(db: Any, message_id: str) -> Message | None:
         except (ValueError, AttributeError, TypeError):
             return None
         result = await db.execute(select(Message).where(Message.id == message_uuid))
-        message = result.scalar_one_or_none()
+        message = result.scalars().first()
 
     if message is None:
         return None
+
+    if visitor_id is not None:
+        conv_result = await db.execute(
+            select(Conversation).where(Conversation.id == message.conversation_id)
+        )
+        conversation = conv_result.scalars().first()
+        if (
+            conversation is None
+            or conversation.channel != WEBCHAT_CHANNEL
+            or conversation.channel_conversation_id != visitor_id
+        ):
+            return None
 
     if message.read_at is None:
         message.read_at = datetime.now(tz=UTC)
@@ -420,9 +494,14 @@ async def push_media(
 
 
 @router.websocket("/ws/chat/{visitor_id}")
-async def webchat_endpoint(websocket: WebSocket, visitor_id: str) -> None:
+async def webchat_endpoint(
+    websocket: WebSocket, visitor_id: str, token: str | None = None
+) -> None:
     """
     WebSocket endpoint for browser-based chat.
+
+    Requires a session token from ``POST /api/v1/webchat/session`` bound to
+    ``visitor_id`` (audit #3); unauthenticated handshakes are closed with 4401.
 
     Inbound frames are rate-limited per visitor (V1.4 F-4); over-limit frames are
     rejected and the socket closed with a best-effort audit record. Plain-text
@@ -431,6 +510,9 @@ async def webchat_endpoint(websocket: WebSocket, visitor_id: str) -> None:
     envelope carrying the resolved conversation id. Outbound AI/agent replies are
     pushed via ``push_reply`` / ``push_media``.
     """
+    if not _verify_visitor_token(visitor_id, token):
+        await websocket.close(code=4401)
+        return
     await manager.connect(visitor_id, websocket)
     await websocket.send_json({"type": "connected", "visitor_id": visitor_id})
 
@@ -462,7 +544,9 @@ async def webchat_endpoint(websocket: WebSocket, visitor_id: str) -> None:
                 read_message_id = parse_read_frame(text)
                 if read_message_id is not None:
                     async with AsyncSessionLocal() as db:
-                        message = await mark_message_read(db, read_message_id)
+                        message = await mark_message_read(
+                            db, read_message_id, visitor_id=visitor_id
+                        )
                         await db.commit()
                     await websocket.send_json(
                         {
@@ -506,7 +590,15 @@ async def webchat_endpoint(websocket: WebSocket, visitor_id: str) -> None:
                 await websocket.send_json({"type": "routed", **result})
             except Exception as exc:  # noqa: BLE001
                 logger.error("Web-chat routing failed", visitor_id=visitor_id, error=str(exc))
-                await websocket.send_json({"type": "error", "message": str(exc)})
+                # Audit #26: never leak internal exception text (SQL fragments,
+                # schema names, connection details) to anonymous visitors.
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "code": "routing_failed",
+                        "message": "Your message could not be processed. Please try again.",
+                    }
+                )
 
     except WebSocketDisconnect:
         manager.disconnect(visitor_id, websocket)

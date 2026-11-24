@@ -5,7 +5,6 @@ Full RAG pipeline: PII detection → model routing → Vault retrieval → LLM i
 """
 
 
-import hashlib
 from dataclasses import dataclass
 
 import structlog
@@ -13,7 +12,7 @@ from sqlalchemy import select
 
 from desk.ai.confidence_scorer import ConfidenceScore, ConfidenceScorer
 from desk.ai.model_router import ModelTarget, RoutingDecision, get_model_router
-from desk.ai.pii_shield import PIIResult, RoutingDirective, get_pii_shield
+from desk.ai.pii_shield import PIIResult, get_pii_shield
 from desk.ai.prompt_builder import PromptBuilder
 from desk.ai.providers.base import LLMProvider, LLMRequest
 from desk.ai.providers.ollama import OllamaProvider
@@ -31,7 +30,7 @@ from desk.observability.tracing import start_span
 from desk.persona.integration import get_prompt_builder_with_persona
 from desk.policy.engine import PolicyEngine
 from desk.schemas.channels import OutboundMessage
-from desk.utils.encryption import FieldEncryption
+from desk.utils.encryption import field_encryption_from_settings
 
 logger = structlog.get_logger()
 
@@ -134,30 +133,52 @@ class AIEngine:
             return
         cfg = snapshot["cfg"]
         if cfg is not None:
-            settings = get_settings()
-            if cfg.local_model_name or cfg.local_model_endpoint:
-                self.local_provider = OllamaProvider(
-                    endpoint=cfg.local_model_endpoint or settings.ollama_endpoint,
-                    model=cfg.local_model_name or settings.local_model_name,
+            # Guard the apply block: a decryption failure (e.g. SECRET_KEY
+            # rotated after a frontier key was saved) must not escape into
+            # process_detailed and dead-letter EVERY message permanently
+            # (audit #13). On failure keep serving with the local provider.
+            try:
+                settings = get_settings()
+                if cfg.local_model_name or cfg.local_model_endpoint:
+                    self.local_provider = OllamaProvider(
+                        endpoint=cfg.local_model_endpoint or settings.ollama_endpoint,
+                        model=cfg.local_model_name or settings.local_model_name,
+                    )
+                    logger.info(
+                        "Applied admin local-model config",
+                        model=cfg.local_model_name,
+                        endpoint=cfg.local_model_endpoint,
+                    )
+                if cfg.frontier_provider == "openai" and cfg.frontier_api_key_encrypted:
+                    key = field_encryption_from_settings().decrypt(
+                        bytes(cfg.frontier_api_key_encrypted).decode("ascii")
+                    )
+                    self.frontier_provider = OpenAIProvider(
+                        api_key=key,
+                        model=cfg.frontier_model_name or "gpt-4o-mini",
+                    )
+                    # Audit #61: keep the router in sync with the effective
+                    # admin config — it was frozen from env at first use, so
+                    # wizard-configured frontier was never routed to.
+                    self.model_router.frontier_enabled = True
+                    self.model_router.frontier_model_name = cfg.frontier_model_name or "gpt-4o-mini"
+                    self.model_router.frontier_model_endpoint = "https://api.openai.com/v1"
+                    logger.info("Applied admin frontier config", model=cfg.frontier_model_name)
+                if cfg.confidence_threshold:
+                    self.confidence_scorer = ConfidenceScorer(
+                        escalation_threshold=cfg.confidence_threshold,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Runtime config apply failed — falling back to local provider",
+                    error=str(exc),
                 )
-                logger.info(
-                    "Applied admin local-model config",
-                    model=cfg.local_model_name,
-                    endpoint=cfg.local_model_endpoint,
-                )
-            if cfg.frontier_provider == "openai" and cfg.frontier_api_key_encrypted:
-                key = FieldEncryption(
-                    hashlib.sha256(get_settings().secret_key.encode()).digest()
-                ).decrypt(bytes(cfg.frontier_api_key_encrypted).decode("ascii"))
-                self.frontier_provider = OpenAIProvider(
-                    api_key=key,
-                    model=cfg.frontier_model_name or "gpt-4o-mini",
-                )
-                logger.info("Applied admin frontier config", model=cfg.frontier_model_name)
-            if cfg.confidence_threshold:
-                self.confidence_scorer = ConfidenceScorer(
-                    escalation_threshold=cfg.confidence_threshold,
-                )
+                # _select_provider falls back to local when frontier is None.
+                self.frontier_provider = None
+                self.model_router.frontier_enabled = False
+        # Advance the stamp even on failure: retrying the same broken config
+        # on every message adds latency and log spam without changing the
+        # outcome. A new admin save produces a new stamp and is re-applied.
         self._applied_cfg_stamp = stamp
 
     async def process(
@@ -263,7 +284,11 @@ class AIEngine:
                 # Step 1.5: Pre-generation Policy Check
                 async with AsyncSessionLocal() as db:
                     policy_engine = PolicyEngine(db)
-                    policy_result = await policy_engine.run_pre_generation_hooks(content)
+                    # Audit #33: pass conversation metadata so channel-scoped
+                    # policies can fire (previously always None — inert).
+                    policy_result = await policy_engine.run_pre_generation_hooks(
+                        content, conversation_metadata={"channel": channel}
+                    )
 
                     if policy_result["policy_decision"] == "block":
                         logger.info("Message blocked by policy", triggers=policy_result["triggers"])
@@ -319,16 +344,35 @@ class AIEngine:
                     model=routing_decision.model_name,
                 )
 
+                # Audit #4: history must obey the same PII gate as the current
+                # message. Raw prior customer turns were previously sent
+                # verbatim to frontier models even when the shield redacted
+                # the current turn — defeating the sovereignty guarantee.
+                history_for_prompt = conversation_history
+                if routing_decision.target == ModelTarget.FRONTIER and conversation_history:
+                    history_for_prompt = []
+                    for entry in conversation_history:
+                        if entry.get("role") == "customer" and entry.get("content"):
+                            hist_pii = await self.pii_shield.analyze(entry["content"])
+                            history_for_prompt.append(
+                                {**entry, "content": hist_pii.redacted_text}
+                            )
+                        else:
+                            history_for_prompt.append(entry)
+
                 # Step 3: Vault Retrieval (knowledge base)
                 knowledge_docs: list[RetrievedDocument] = []
                 try:
-                    if not pii_result.pii_detected or pii_result.routing_directive == RoutingDirective.REDACTED_FRONTIER_OK:
-                        # Only retrieve knowledge if safe to do so
-                        knowledge_docs = await self.vault_client.retrieve(
-                            query=pii_result.redacted_text if pii_result.pii_detected else content,
-                            top_k=5,
-                        )
-                        logger.info("Knowledge retrieval complete", documents=len(knowledge_docs))
+                    # Audit #53: Vault is operator-local, so retrieval is safe
+                    # even for LOCAL_MODEL_ONLY turns (query is redacted when
+                    # PII was detected). Skipping it capped every PII-bearing
+                    # message at confidence 0.56 — below the escalation
+                    # threshold — so the AI could never answer them.
+                    knowledge_docs = await self.vault_client.retrieve(
+                        query=pii_result.redacted_text if pii_result.pii_detected else content,
+                        top_k=5,
+                    )
+                    logger.info("Knowledge retrieval complete", documents=len(knowledge_docs))
                 except Exception as e:
                     logger.warning("Knowledge retrieval failed (continuing without)", error=str(e))
                     # Continue without knowledge
@@ -338,7 +382,7 @@ class AIEngine:
                     persona_prompt_builder = await get_prompt_builder_with_persona(db)
                     system_prompt, prompt = await persona_prompt_builder.build_prompt_with_persona(
                         user_message=pii_result.redacted_text if pii_result.pii_detected else content,
-                        conversation_history=conversation_history,
+                        conversation_history=history_for_prompt,
                         knowledge_context=[doc.to_dict() for doc in knowledge_docs],
                     )
 
@@ -362,12 +406,36 @@ class AIEngine:
                     )
                 except Exception as e:
                     logger.error("LLM inference failed", error=str(e))
-                    # Fall back to a canned reply; metadata reflects the intended model.
-                    return AIResult(
-                        text=t("fallback_reply", lang, snippet=content[:50]),
-                        model=routing_decision.model_name,
-                        routing=routing_decision.target.value,
-                    )
+                    # Audit #59: execute the fallback chain instead of acking a
+                    # canned non-answer as success — try the local provider,
+                    # then escalate to a human if everything fails.
+                    fallback_response = None
+                    if provider is not self.local_provider:
+                        try:
+                            fallback_response = await self.local_provider.generate(llm_request)
+                            logger.info(
+                                "Local fallback inference complete",
+                                model=fallback_response.model,
+                            )
+                        except Exception as fallback_err:  # noqa: BLE001
+                            logger.error("Local fallback failed", error=str(fallback_err))
+                    if fallback_response is None:
+                        await self._escalate_conversation(
+                            conversation_id,
+                            ConfidenceScore(
+                                score=0.0,
+                                should_escalate=True,
+                                reasoning="provider_failure",
+                                factors={},
+                            ),
+                        )
+                        return AIResult(
+                            text=t("escalation_notice", lang),
+                            model=routing_decision.model_name,
+                            routing=routing_decision.target.value,
+                            escalated=True,
+                        )
+                    llm_response = fallback_response
 
                 # Step 5.5: Post-generation Policy Check
                 async with AsyncSessionLocal() as db:
@@ -375,6 +443,7 @@ class AIEngine:
                     post_policy_result = await policy_engine.run_post_generation_hooks(
                         llm_response.text,
                         content,
+                        conversation_metadata={"channel": channel},
                     )
 
                     if post_policy_result["action"] == "block":

@@ -5,6 +5,8 @@ Validates license keys, enforces feature gates between free and paid tiers,
 and manages grace periods.
 """
 
+import hashlib
+import hmac
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
@@ -149,8 +151,18 @@ class LicenseManager:
 
         now = datetime.now(tz=UTC)
 
+        # Audit #49: a NULL valid_until is NOT perpetual validity — treat it
+        # as invalid (previously such rows skipped all expiry logic and were
+        # reset to ACTIVE).
+        if self._license_state.valid_until is None:
+            self._license_state.status = STATUS_EXPIRED
+            self._license_state.last_validated_at = now
+            await self.db.commit()
+            logger.warning("License has no valid_until — treated as expired")
+            return False
+
         # Check if license is expired
-        if self._license_state.valid_until and now > self._license_state.valid_until:
+        if now > self._license_state.valid_until:
             # Check grace period
             grace_end = self._license_state.grace_period_ends or self._license_state.valid_until
             if now > grace_end:
@@ -201,6 +213,17 @@ class LicenseManager:
             )
             return False
 
+        # Audit #49: re-check expiry directly — the cached status string alone
+        # kept expired licenses passing gates until something revalidated.
+        now = datetime.now(tz=UTC)
+        valid_until = self._license_state.valid_until
+        if valid_until is None:
+            return False
+        grace_end = self._license_state.grace_period_ends or valid_until
+        if now > grace_end:
+            logger.warning("License expired, feature denied", feature=feature.value)
+            return False
+
         tier = LicenseTier(self._license_state.tier)
         allowed_features = TIER_FEATURES.get(tier, set())
 
@@ -219,12 +242,36 @@ class LicenseManager:
         In production, this would validate against a license server.
         For MVP, accepts any key and sets tier based on key format.
         """
-        # Simple key format: "free", "paid", "enterprise"
-        tier = LicenseTier.FREE
-        if license_key.lower() == "paid":
-            tier = LicenseTier.PAID
-        elif license_key.lower() == "enterprise":
-            tier = LicenseTier.ENTERPRISE
+        # Audit #48: keys must be HMAC-signed with the operator's activation
+        # secret — format "<tier>.<expiry_iso8601>.<hmac-sha256-hex>" where the
+        # signature covers "<tier>.<expiry_iso8601>". Previously the literal
+        # strings 'paid'/'enterprise' granted those tiers with no validation.
+        secret = self.settings.license_activation_secret
+        if not secret:
+            raise ValueError(
+                "License activation unavailable: LICENSE_ACTIVATION_SECRET not configured"
+            )
+        # Split from the right: the ISO expiry may itself contain '.'
+        # (fractional seconds), while the hex signature never does.
+        rest, dot, signature = license_key.rpartition(".")
+        tier_str, dot2, expiry_str = rest.partition(".")
+        if not dot or not dot2:
+            raise ValueError("Invalid license key format (expected tier.expiry.signature)")
+        expected = hmac.new(
+            secret.encode(), f"{tier_str}.{expiry_str}".encode(), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            raise ValueError("Invalid license key signature")
+        try:
+            tier = LicenseTier(tier_str)
+        except ValueError as exc:
+            raise ValueError(f"Unknown license tier '{tier_str}'") from exc
+        try:
+            expiry = datetime.fromisoformat(expiry_str)
+        except ValueError as exc:
+            raise ValueError("Invalid license expiry (expected ISO 8601)") from exc
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=UTC)
 
         if not self._license_state:
             await self.initialize()
@@ -232,12 +279,14 @@ class LicenseManager:
         assert self._license_state is not None
 
         now = datetime.now(tz=UTC)
+        if expiry <= now:
+            raise ValueError("License key already expired")
         self._license_state.license_key = license_key
         self._license_state.tier = tier.value
         self._license_state.status = STATUS_ACTIVE
-        self._license_state.valid_until = now + timedelta(days=365)
-        self._license_state.grace_period_ends = now + timedelta(
-            days=365 + self.settings.license_grace_period_days
+        self._license_state.valid_until = expiry
+        self._license_state.grace_period_ends = expiry + timedelta(
+            days=self.settings.license_grace_period_days
         )
         self._license_state.features = {f.value: True for f in TIER_FEATURES[tier]}
         self._license_state.last_validated_at = now

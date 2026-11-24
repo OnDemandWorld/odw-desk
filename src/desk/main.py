@@ -33,9 +33,12 @@ from desk.channels.webchat import WebChatAdapter
 from desk.channels.webchat import router as webchat_router
 from desk.channels.whatsapp_business import get_adapter as get_whatsapp_adapter
 from desk.channels.whatsapp_business import router as whatsapp_router
+from desk.compliance.engine import ComplianceEngine
 from desk.config import get_settings
 from desk.db import AsyncSessionLocal, get_engine
 from desk.events.redis_streams import RedisStreamsEventBus
+from desk.license.gates import require_feature
+from desk.license.manager import FeatureGate
 from desk.observability.tracing import TraceIdMiddleware
 from desk.security.rbac import require_role
 from desk.sla.checker import scan_due_conversations
@@ -64,6 +67,17 @@ _ensure_loopback_bypasses_proxy()
 logger = structlog.get_logger()
 
 
+async def _retention_sweep() -> dict:
+    """Run one data-retention sweep in its own session (audit #12).
+
+    Previously enforce_retention_policy had no callers, so the configured
+    DATA_RETENTION_DAYS was never enforced (GDPR storage limitation).
+    """
+    async with AsyncSessionLocal() as session:
+        engine = ComplianceEngine(session)
+        return await engine.enforce_retention_policy()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan events: startup and shutdown."""
@@ -83,6 +97,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     event_bus = RedisStreamsEventBus(redis_manager)
     await event_bus.connect()
     app.state.event_bus = event_bus
+
+    # Initialize license state (audit #11) so feature gates and expiry checks
+    # have a row to read; enforcement itself is opt-in via
+    # LICENSE_ENFORCEMENT_ENABLED (see desk.license.gates.require_feature).
+    try:
+        from desk.license.manager import LicenseManager
+
+        async with AsyncSessionLocal() as license_db:
+            await LicenseManager(license_db).initialize()
+    except Exception as exc:  # noqa: BLE001 - never block startup on licensing
+        logger.warning("License initialization failed (gates fail open)", error=str(exc))
+
+    # Load persisted runtime overrides (audit #35): load_all previously had no
+    # callers, so admin-configured Vault/PII/WhatsApp settings were silently
+    # lost on every restart and readers fell back to env defaults.
+    try:
+        from desk.admin.runtime_settings import load_all
+
+        async with AsyncSessionLocal() as settings_db:
+            await load_all(settings_db)
+    except Exception as exc:  # noqa: BLE001 - env defaults remain usable
+        logger.warning("Runtime settings load failed (using env defaults)", error=str(exc))
 
     # Initialize channel adapter manager (INFRA-006)
     channel_manager = ChannelAdapterManager(event_bus, redis_manager)
@@ -129,11 +165,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     async def sla_scanner_loop() -> None:
         while True:
             try:
-                async with AsyncSessionLocal() as session:
-                    summary = await scan_due_conversations(session, event_bus=app.state.event_bus)
-                    await session.commit()
-                if summary.get("breached"):
-                    logger.info("SLA scan found breaches", **summary)
+                # Audit #46: only one scanner across workers/replicas — a
+                # Redis SET NX lock prevents duplicated full-table scans and
+                # racing double escalations of the same conversation.
+                async with redis_manager.get_client() as client:
+                    acquired = await client.set(
+                        "desk:sla:scanner:lock",
+                        "1",
+                        nx=True,
+                        ex=settings.sla_scan_interval_seconds,
+                    )
+                if acquired:
+                    async with AsyncSessionLocal() as session:
+                        summary = await scan_due_conversations(
+                            session, event_bus=app.state.event_bus
+                        )
+                        await session.commit()
+                    if summary.get("breached"):
+                        logger.info("SLA scan found breaches", **summary)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -142,15 +191,31 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     sla_task = asyncio.create_task(sla_scanner_loop(), name="sla-scanner")
 
+    # Periodic data-retention enforcement (audit #12). Sleeps first so a
+    # restart does not immediately sweep; failures are logged, never fatal.
+    async def retention_scanner_loop() -> None:
+        while True:
+            await asyncio.sleep(settings.retention_scan_interval_seconds)
+            try:
+                summary = await _retention_sweep()
+                if summary.get("deleted_conversations"):
+                    logger.info("Retention sweep complete", **summary)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Retention sweep failed", error=str(exc))
+
+    retention_task = asyncio.create_task(retention_scanner_loop(), name="retention-scanner")
+
     logger.info("Redis, event bus, channel adapter manager, and message processor initialized")
 
     yield
 
     logger.info("Shutting down ODW.ai Desk")
-    # Cancel SLA scanner and message processor workers
-    for task in (sla_task, processor_task):
+    # Cancel SLA scanner, retention scanner and message processor workers
+    for task in (sla_task, retention_task, processor_task):
         task.cancel()
-    for task in (sla_task, processor_task):
+    for task in (sla_task, retention_task, processor_task):
         try:
             await task
         except asyncio.CancelledError:
@@ -215,7 +280,13 @@ def create_app() -> FastAPI:
     # persona/policy management lives under /api/v1/admin/ and is admin-only;
     # it was previously registered with api_guard (auth only), letting agents
     # access it (found via role-based UAT). Guard it as admin.
-    app.include_router(persona_policy_router, dependencies=admin_guard)
+    # Persona/policy management is a paid surface (audit #11): gate it when
+    # license enforcement is enabled (no-op otherwise).
+    app.include_router(
+        persona_policy_router,
+        dependencies=admin_guard
+        + [Depends(require_feature(FeatureGate.CUSTOM_PERSONA))],
+    )
 
     @app.get("/health", tags=["Health"])
     async def health_check() -> dict:

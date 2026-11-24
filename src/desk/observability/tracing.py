@@ -42,8 +42,12 @@ def new_trace_id() -> str:
 
 
 def new_span_id() -> str:
-    """Generate a fresh span id (UUID4 hex)."""
-    return uuid.uuid4().hex
+    """Generate a fresh span id (8 bytes / 16 hex chars per OTLP spec).
+
+    Audit #52: the previous 32-hex (16-byte) ids were rejected by OTLP
+    collectors ('invalid span id length'), silently dropping every span.
+    """
+    return uuid.uuid4().hex[:16]
 
 
 def get_current_trace_id() -> str | None:
@@ -297,10 +301,18 @@ class OtlpHttpSpanExporter:
     def export(self, span: Span) -> None:
         if not self.endpoint:
             return
+        # Audit #51: export off the event loop — a slow/hung collector used to
+        # block every concurrent request for up to the HTTP timeout per span.
+        import threading
+
+        payload = self._payload(span)
+        threading.Thread(target=self._post, args=(payload,), daemon=True).start()
+
+    def _post(self, payload: dict) -> None:
         try:
             import httpx
 
-            httpx.post(self.endpoint, json=self._payload(span), timeout=self.timeout)
+            httpx.post(self.endpoint, json=payload, timeout=self.timeout)
         except Exception as exc:  # noqa: BLE001 - best-effort, silent degradation
             logger.debug("OTLP span export failed (best-effort)", error=str(exc))
 

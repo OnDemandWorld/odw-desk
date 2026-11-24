@@ -5,15 +5,16 @@ Admin setup wizard, configuration management, and compliance APIs.
 """
 
 import csv
-import hashlib
 import io
 from datetime import datetime
 from typing import Any
-from uuid import NAMESPACE_DNS, UUID, uuid5
+from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
+from jose import JWTError, jwt
+from pydantic import BaseModel
 from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.selectable import Select
@@ -22,10 +23,12 @@ from desk.admin.runtime_settings import persist as persist_runtime_setting
 from desk.compliance.service import VALID_DELETE_MODES, ComplianceService
 from desk.config import get_settings
 from desk.dependencies import get_db
+from desk.license.gates import require_feature
+from desk.license.manager import FeatureGate
 from desk.models.ai_configuration import AIConfiguration
 from desk.models.audit_log import AuditLog
 from desk.security.rbac import require_role
-from desk.utils.encryption import FieldEncryption
+from desk.utils.encryption import field_encryption_from_settings
 
 logger = structlog.get_logger()
 
@@ -39,12 +42,20 @@ _UNSUPPORTED_PROVIDERS = ("anthropic",)
 
 
 def _deployment_uuid() -> UUID:
-    """Map the free-form deployment id onto the UUID column deterministically."""
+    """Map the free-form deployment id onto the UUID column deterministically.
+
+    Audit #87: the fallback now uses the SAME derivation as policy rows
+    (default_deployment_id, uuid5 NAMESPACE_URL) — previously NAMESPACE_DNS
+    produced a different UUID for the same deployment, so joins between
+    ai_configurations and response_policies on deployment_id silently failed.
+    """
+    from desk.policy.engine import default_deployment_id
+
     deployment_id = get_settings().deployment_id
     try:
         return UUID(deployment_id)
     except (ValueError, AttributeError):
-        return uuid5(NAMESPACE_DNS, deployment_id)
+        return default_deployment_id()
 
 
 # ============================================================================
@@ -95,11 +106,56 @@ async def get_setup_status(db: AsyncSession = Depends(get_db)) -> dict[str, Any]
     }
 
 
+class VaultSetupRequest(BaseModel):
+    """Vault setup payload. Secrets travel in the body, never the URL (audit #2)."""
+
+    vault_url: str
+    vault_api_key: str
+    collection_id: str
+
+
+class WhatsAppSetupRequest(BaseModel):
+    """WhatsApp setup payload (secrets in body, not query string — audit #2)."""
+
+    access_token: str
+    phone_number_id: str
+    business_account_id: str
+    webhook_verify_token: str
+
+
+class AIModelSetupRequest(BaseModel):
+    """AI model setup payload (secrets in body, not query string — audit #2)."""
+
+    provider: str
+    model_name: str
+    api_key: str | None = None
+    endpoint: str | None = None
+
+
+def _audit_actor(request: Request, claimed: str) -> str:
+    """
+    Audit attribution from the authenticated principal (audit #18).
+
+    A JWT ``sub`` always overrides the caller-supplied actor_id so erasure /
+    export records cannot falsely attribute the action to another actor.
+    Shared-key principals (no JWT) fall back to the claimed value.
+    """
+    auth = request.headers.get("authorization", "")
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() == "bearer" and token.strip():
+        try:
+            claims = jwt.decode(token.strip(), get_settings().secret_key, algorithms=["HS256"])
+        except JWTError:
+            claims = {}
+        sub = claims.get("sub")
+        if sub:
+            return str(sub)
+    return claimed
+
+
 @router.post("/setup/vault")
 async def configure_vault(
-    vault_url: str = Query(..., description="Vault API URL"),
-    vault_api_key: str = Query(..., description="Vault API key"),
-    collection_id: str = Query(..., description="Default collection ID"),
+    payload: VaultSetupRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Configure Vault connection (persisted; takes effect immediately)."""
@@ -107,30 +163,27 @@ async def configure_vault(
         db,
         "vault",
         {
-            "vault_url": vault_url,
-            "vault_api_key": vault_api_key,
-            "vault_collection_id": collection_id,
+            "vault_url": payload.vault_url,
+            "vault_api_key": payload.vault_api_key,
+            "vault_collection_id": payload.collection_id,
         },
     )
     # Drop the cached client so the next retrieval rebuilds with the override.
     from desk.ai.vault_client import reset_vault_client
 
     reset_vault_client()
-    logger.info("Vault configured", vault_url=vault_url, collection_id=collection_id)
+    logger.info("Vault configured", vault_url=payload.vault_url, collection_id=payload.collection_id)
     return {
         "success": True,
         "message": "Vault configuration saved",
-        "vault_url": vault_url,
-        "collection_id": collection_id,
+        "vault_url": payload.vault_url,
+        "collection_id": payload.collection_id,
     }
 
 
 @router.post("/setup/whatsapp")
 async def configure_whatsapp(
-    access_token: str = Query(..., description="WhatsApp access token"),
-    phone_number_id: str = Query(..., description="Phone number ID"),
-    business_account_id: str = Query(..., description="Business account ID"),
-    webhook_verify_token: str = Query(..., description="Webhook verify token"),
+    payload: WhatsAppSetupRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Configure WhatsApp Business API (persisted; channel picks it up on restart)."""
@@ -138,29 +191,30 @@ async def configure_whatsapp(
         db,
         "whatsapp",
         {
-            "access_token": access_token,
-            "phone_number_id": phone_number_id,
-            "business_account_id": business_account_id,
-            "webhook_verify_token": webhook_verify_token,
+            "access_token": payload.access_token,
+            "phone_number_id": payload.phone_number_id,
+            "business_account_id": payload.business_account_id,
+            "webhook_verify_token": payload.webhook_verify_token,
         },
     )
-    logger.info("WhatsApp configured", phone_number_id=phone_number_id)
+    logger.info("WhatsApp configured", phone_number_id=payload.phone_number_id)
     return {
         "success": True,
         "message": "WhatsApp configuration saved (applies on service restart)",
-        "phone_number_id": phone_number_id,
+        "phone_number_id": payload.phone_number_id,
     }
 
 
 @router.post("/setup/ai-model")
 async def configure_ai_model(
-    provider: str = Query(..., description="Model provider (ollama, openai, anthropic)"),
-    model_name: str = Query(..., description="Model name"),
-    api_key: str = Query(None, description="API key (if required)"),
-    endpoint: str = Query(None, description="Endpoint URL (if required)"),
+    payload: AIModelSetupRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Configure AI model."""
+    provider = payload.provider
+    model_name = payload.model_name
+    api_key = payload.api_key
+    endpoint = payload.endpoint
     if provider in _UNSUPPORTED_PROVIDERS:
         raise HTTPException(
             status_code=400,
@@ -185,11 +239,9 @@ async def configure_ai_model(
         ai_config.frontier_provider = provider
         ai_config.frontier_model_name = model_name
         if api_key:
-            # Derive a 32-byte AES key from the app secret (same fallback as
-            # FieldEncryption.from_env, but sourced from settings so this works
-            # even when SECRET_KEY is not exported to the environment).
-            key = hashlib.sha256(get_settings().secret_key.encode()).digest()
-            encrypted = FieldEncryption(key).encrypt(api_key)
+            # Audit #47: single shared derivation (DESK_ENCRYPTION_KEY or
+            # SECRET_KEY) so every encrypt/decrypt path stays compatible.
+            encrypted = field_encryption_from_settings().encrypt(api_key)
             ai_config.frontier_api_key_encrypted = encrypted.encode("ascii")
     else:
         # Local model (ollama / vLLM / …): provider itself is not persisted;
@@ -328,7 +380,10 @@ async def update_pii_configuration(
 # ============================================================================
 
 
-@router.get("/compliance/audit-logs")
+@router.get(
+    "/compliance/audit-logs",
+    dependencies=[Depends(require_feature(FeatureGate.COMPLIANCE_TOOLS))],
+)
 async def get_audit_logs(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
@@ -451,7 +506,13 @@ def _parse_report_timestamp(value: str, field: str) -> datetime:
         ) from exc
 
 
-@router.get("/compliance/report", dependencies=[Depends(require_role("admin"))])
+@router.get(
+    "/compliance/report",
+    dependencies=[
+        Depends(require_role("admin")),
+        Depends(require_feature(FeatureGate.COMPLIANCE_TOOLS)),
+    ],
+)
 async def get_compliance_report(
     format: str = Query("json", description="Output format: json (default) or csv"),
     start: str = Query(None, description="Inclusive start timestamp (ISO-8601)"),
@@ -504,8 +565,12 @@ async def get_compliance_report(
     }
 
 
-@router.post("/compliance/export")
+@router.post(
+    "/compliance/export",
+    dependencies=[Depends(require_feature(FeatureGate.COMPLIANCE_TOOLS))],
+)
 async def export_customer_data(
+    request: Request,
     customer_id: UUID = Query(..., description="Customer ID to export"),
     actor_id: str = Query("system", description="Actor requesting the export (for audit)"),
     db: AsyncSession = Depends(get_db),
@@ -518,15 +583,21 @@ async def export_customer_data(
     """
     service = ComplianceService(db)
     try:
-        export = await service.export_customer_data(customer_id, actor_id=actor_id)
+        export = await service.export_customer_data(
+            customer_id, actor_id=_audit_actor(request, actor_id)
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return {"success": True, "format": "json", "export": export}
 
 
-@router.post("/compliance/delete")
+@router.post(
+    "/compliance/delete",
+    dependencies=[Depends(require_feature(FeatureGate.COMPLIANCE_TOOLS))],
+)
 async def delete_customer_data(
+    request: Request,
     customer_id: UUID = Query(..., description="Customer ID to delete"),
     reason: str = Query(..., description="Deletion reason"),
     mode: str = Query("anonymize", description="Erasure strategy: anonymize (default) or hard"),
@@ -549,7 +620,7 @@ async def delete_customer_data(
     service = ComplianceService(db)
     try:
         summary = await service.delete_customer_data(
-            customer_id, mode=mode, actor_id=actor_id, reason=reason
+            customer_id, mode=mode, actor_id=_audit_actor(request, actor_id), reason=reason
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -557,7 +628,10 @@ async def delete_customer_data(
     return {"success": True, **summary}
 
 
-@router.get("/compliance/reports")
+@router.get(
+    "/compliance/reports",
+    dependencies=[Depends(require_feature(FeatureGate.COMPLIANCE_TOOLS))],
+)
 async def get_compliance_reports() -> dict[str, Any]:
     """Get available compliance reports."""
     return {

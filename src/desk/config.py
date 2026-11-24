@@ -71,11 +71,29 @@ class Settings(BaseSettings):
     deployment_id: str = Field(
         default="dev-local-001", description="Unique deployment identifier"
     )
+    desk_encryption_key: str = Field(
+        default="",
+        description=(
+            "Optional dedicated key for field encryption (stored API keys). "
+            "When empty, SECRET_KEY is used. Set this to separate encryption "
+            "from JWT signing (audit #47). Changing it makes existing "
+            "ciphertexts undecryptable — re-save stored credentials after rotation."
+        ),
+    )
+    license_activation_secret: str = Field(
+        default="",
+        description=(
+            "HMAC secret used to verify signed license keys "
+            "(tier.expiry_iso.signature). When empty, license activation is "
+            "rejected (audit #48 — previously any literal string granted a tier)."
+        ),
+    )
     desk_api_key: str = Field(
         default="",
         description=(
-            "Optional API key guarding /api/v1/admin/* and /api/v1/agents/*. "
-            "When empty, those routes stay open (backward compatible / dev)."
+            "API key guarding /api/v1/admin/* and /api/v1/agents/*. "
+            "When empty, those routes stay open ONLY in development; in "
+            "staging/production a valid JWT bearer is required (fail closed)."
         ),
     )
     desk_default_role: Literal["admin", "agent"] = Field(
@@ -205,6 +223,11 @@ class Settings(BaseSettings):
     data_retention_days: int = Field(
         default=365, ge=1, description="Conversation data retention period (days)"
     )
+    retention_scan_interval_seconds: int = Field(
+        default=86400,
+        ge=60,
+        description="Interval between automated retention sweeps (seconds, default daily)",
+    )
 
     # Compliance (V1.4)
     compliance_cross_product_erasure: bool = Field(
@@ -261,6 +284,14 @@ class Settings(BaseSettings):
 
     # License
     license_key: str = Field(default="free", description="Desk license key")
+    license_enforcement_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enforce license feature gates on paid surfaces (persona/policy "
+            "management, compliance tools). Default off for dev/test; enable "
+            "in deployments that monetize paid tiers (audit #11)."
+        ),
+    )
     license_grace_period_days: int = Field(
         default=7, ge=0, description="License grace period (days)"
     )

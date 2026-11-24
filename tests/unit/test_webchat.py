@@ -27,6 +27,15 @@ from desk.channels.webchat import (
 from desk.main import app
 
 
+def _ws_url(visitor_id: str) -> str:
+    """Signed WS URL for tests (audit #3 requires a session token)."""
+    import time as _time
+
+    from desk.channels.webchat import _sign_visitor_token
+
+    return f"/ws/chat/{visitor_id}?token={_sign_visitor_token(visitor_id, int(_time.time()) + 3600)}"
+
+
 class TestBuildInboundMessage:
     def test_normalizes_to_webchat_channel(self):
         inbound = build_inbound_message("visitor-1", "Hello", message_id="m1")
@@ -127,7 +136,7 @@ class TestWebsocketEndpoint:
             patch("desk.channels.webchat.get_event_bus", return_value=MagicMock()),
         ):
             client = TestClient(app)
-            with client.websocket_connect("/ws/chat/visitor-1") as websocket:
+            with client.websocket_connect(_ws_url("visitor-1")) as websocket:
                 connected = websocket.receive_json()
                 assert connected["type"] == "connected"
                 assert connected["visitor_id"] == "visitor-1"
@@ -154,7 +163,7 @@ class TestWebsocketEndpoint:
             ) as audit_mock,
         ):
             client = TestClient(app)
-            with client.websocket_connect("/ws/chat/visitor-flood") as websocket:
+            with client.websocket_connect(_ws_url("visitor-flood")) as websocket:
                 connected = websocket.receive_json()
                 assert connected["type"] == "connected"
 
@@ -197,7 +206,7 @@ class TestWebsocketEndpoint:
             ),
         ):
             client = TestClient(app)
-            with client.websocket_connect("/ws/chat/visitor-media") as websocket:
+            with client.websocket_connect(_ws_url("visitor-media")) as websocket:
                 websocket.receive_json()  # connected
                 websocket.send_text(frame)
                 routed = websocket.receive_json()
