@@ -12,8 +12,9 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
+from jose import JWTError, jwt
 from pydantic import BaseModel
 from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -130,6 +131,27 @@ class AIModelSetupRequest(BaseModel):
     model_name: str
     api_key: str | None = None
     endpoint: str | None = None
+
+
+def _audit_actor(request: Request, claimed: str) -> str:
+    """
+    Audit attribution from the authenticated principal (audit #18).
+
+    A JWT ``sub`` always overrides the caller-supplied actor_id so erasure /
+    export records cannot falsely attribute the action to another actor.
+    Shared-key principals (no JWT) fall back to the claimed value.
+    """
+    auth = request.headers.get("authorization", "")
+    scheme, _, token = auth.partition(" ")
+    if scheme.lower() == "bearer" and token.strip():
+        try:
+            claims = jwt.decode(token.strip(), get_settings().secret_key, algorithms=["HS256"])
+        except JWTError:
+            claims = {}
+        sub = claims.get("sub")
+        if sub:
+            return str(sub)
+    return claimed
 
 
 @router.post("/setup/vault")
@@ -551,6 +573,7 @@ async def get_compliance_report(
     dependencies=[Depends(require_feature(FeatureGate.COMPLIANCE_TOOLS))],
 )
 async def export_customer_data(
+    request: Request,
     customer_id: UUID = Query(..., description="Customer ID to export"),
     actor_id: str = Query("system", description="Actor requesting the export (for audit)"),
     db: AsyncSession = Depends(get_db),
@@ -563,7 +586,9 @@ async def export_customer_data(
     """
     service = ComplianceService(db)
     try:
-        export = await service.export_customer_data(customer_id, actor_id=actor_id)
+        export = await service.export_customer_data(
+            customer_id, actor_id=_audit_actor(request, actor_id)
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -575,6 +600,7 @@ async def export_customer_data(
     dependencies=[Depends(require_feature(FeatureGate.COMPLIANCE_TOOLS))],
 )
 async def delete_customer_data(
+    request: Request,
     customer_id: UUID = Query(..., description="Customer ID to delete"),
     reason: str = Query(..., description="Deletion reason"),
     mode: str = Query("anonymize", description="Erasure strategy: anonymize (default) or hard"),
@@ -597,7 +623,7 @@ async def delete_customer_data(
     service = ComplianceService(db)
     try:
         summary = await service.delete_customer_data(
-            customer_id, mode=mode, actor_id=actor_id, reason=reason
+            customer_id, mode=mode, actor_id=_audit_actor(request, actor_id), reason=reason
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

@@ -33,6 +33,7 @@ from desk.compliance.engine import ComplianceEngine
 from desk.config import get_settings
 from desk.db import AsyncSessionLocal
 from desk.dependencies import get_event_bus
+from desk.models.conversation import Conversation
 from desk.models.message import Message
 from desk.observability.tracing import start_span
 from desk.router.message_router import MessageRouter
@@ -312,18 +313,27 @@ def parse_read_frame(raw: str) -> str | None:
     return str(message_id) if message_id else None
 
 
-async def mark_message_read(db: Any, message_id: str) -> Message | None:
+async def mark_message_read(
+    db: Any, message_id: str, visitor_id: str | None = None
+) -> Message | None:
     """
     Mark a message as read by setting ``read_at`` (V1.6 F-4, DC1).
 
     Looks the message up by its channel message id first, then by primary key
     (when ``message_id`` is a UUID). Idempotent: an already-read message keeps
     its original ``read_at``. Best-effort — returns None when not found.
+
+    Audit #19: when ``visitor_id`` is given (the WS endpoint always passes it),
+    the message must belong to that visitor's own webchat conversation —
+    previously any visitor could mark any customer's message read across
+    channels, and the ack acted as a message-id existence oracle.
     """
+    # channel_message_id is unique per conversation, not globally — use
+    # first() so a duplicated id cannot raise MultipleResultsFound.
     result = await db.execute(
         select(Message).where(Message.channel_message_id == message_id)
     )
-    message: Message | None = result.scalar_one_or_none()
+    message: Message | None = result.scalars().first()
 
     if message is None:
         try:
@@ -331,10 +341,22 @@ async def mark_message_read(db: Any, message_id: str) -> Message | None:
         except (ValueError, AttributeError, TypeError):
             return None
         result = await db.execute(select(Message).where(Message.id == message_uuid))
-        message = result.scalar_one_or_none()
+        message = result.scalars().first()
 
     if message is None:
         return None
+
+    if visitor_id is not None:
+        conv_result = await db.execute(
+            select(Conversation).where(Conversation.id == message.conversation_id)
+        )
+        conversation = conv_result.scalars().first()
+        if (
+            conversation is None
+            or conversation.channel != WEBCHAT_CHANNEL
+            or conversation.channel_conversation_id != visitor_id
+        ):
+            return None
 
     if message.read_at is None:
         message.read_at = datetime.now(tz=UTC)
@@ -520,7 +542,9 @@ async def webchat_endpoint(
                 read_message_id = parse_read_frame(text)
                 if read_message_id is not None:
                     async with AsyncSessionLocal() as db:
-                        message = await mark_message_read(db, read_message_id)
+                        message = await mark_message_read(
+                            db, read_message_id, visitor_id=visitor_id
+                        )
                         await db.commit()
                     await websocket.send_json(
                         {
@@ -564,7 +588,15 @@ async def webchat_endpoint(
                 await websocket.send_json({"type": "routed", **result})
             except Exception as exc:  # noqa: BLE001
                 logger.error("Web-chat routing failed", visitor_id=visitor_id, error=str(exc))
-                await websocket.send_json({"type": "error", "message": str(exc)})
+                # Audit #26: never leak internal exception text (SQL fragments,
+                # schema names, connection details) to anonymous visitors.
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "code": "routing_failed",
+                        "message": "Your message could not be processed. Please try again.",
+                    }
+                )
 
     except WebSocketDisconnect:
         manager.disconnect(visitor_id, websocket)
