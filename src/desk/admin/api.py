@@ -9,7 +9,7 @@ import hashlib
 import io
 from datetime import datetime
 from typing import Any
-from uuid import NAMESPACE_DNS, UUID, uuid5
+from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -42,12 +42,20 @@ _UNSUPPORTED_PROVIDERS = ("anthropic",)
 
 
 def _deployment_uuid() -> UUID:
-    """Map the free-form deployment id onto the UUID column deterministically."""
+    """Map the free-form deployment id onto the UUID column deterministically.
+
+    Audit #87: the fallback now uses the SAME derivation as policy rows
+    (default_deployment_id, uuid5 NAMESPACE_URL) — previously NAMESPACE_DNS
+    produced a different UUID for the same deployment, so joins between
+    ai_configurations and response_policies on deployment_id silently failed.
+    """
+    from desk.policy.engine import default_deployment_id
+
     deployment_id = get_settings().deployment_id
     try:
         return UUID(deployment_id)
     except (ValueError, AttributeError):
-        return uuid5(NAMESPACE_DNS, deployment_id)
+        return default_deployment_id()
 
 
 # ============================================================================

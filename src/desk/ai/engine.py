@@ -278,7 +278,11 @@ class AIEngine:
                 # Step 1.5: Pre-generation Policy Check
                 async with AsyncSessionLocal() as db:
                     policy_engine = PolicyEngine(db)
-                    policy_result = await policy_engine.run_pre_generation_hooks(content)
+                    # Audit #33: pass conversation metadata so channel-scoped
+                    # policies can fire (previously always None — inert).
+                    policy_result = await policy_engine.run_pre_generation_hooks(
+                        content, conversation_metadata={"channel": channel}
+                    )
 
                     if policy_result["policy_decision"] == "block":
                         logger.info("Message blocked by policy", triggers=policy_result["triggers"])
@@ -406,6 +410,7 @@ class AIEngine:
                     post_policy_result = await policy_engine.run_post_generation_hooks(
                         llm_response.text,
                         content,
+                        conversation_metadata={"channel": channel},
                     )
 
                     if post_policy_result["action"] == "block":

@@ -55,6 +55,50 @@ def default_deployment_id() -> uuid.UUID:
     return uuid.uuid5(uuid.NAMESPACE_URL, f"odw-desk:deployment:{settings.deployment_id}")
 
 
+def _keyword_match(keyword: str, content_lower: str) -> bool:
+    """
+    Word-boundary keyword match (audit #34).
+
+    Plain substring matching fired 'vs' inside 'TVs' and 'law' inside 'flaw',
+    blocking/escalating innocent messages. CJK keywords keep substring
+    semantics because Chinese text has no word-delimiting boundaries.
+    """
+    kw = keyword.lower()
+    if not kw:
+        return False
+    if any("一" <= ch <= "鿿" for ch in kw):
+        return kw in content_lower
+    return re.search(r"\b" + re.escape(kw) + r"\b", content_lower) is not None
+
+
+def validate_trigger_config(config: dict[str, Any] | None) -> None:
+    """
+    Validate trigger_config shape at creation time (audit #32).
+
+    Previously an arbitrary dict was accepted: a non-list keywords value or
+    an invalid regex raised on EVERY customer message inside the pipeline,
+    taking down all AI replies. Raises ValueError on malformed config.
+    """
+    if config is None:
+        return
+    if not isinstance(config, dict):
+        raise ValueError("trigger_config must be an object")
+    for key in ("keywords", "patterns", "topics"):
+        value = config.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"trigger_config.{key} must be a list of strings")
+    for pattern in config.get("patterns") or []:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(f"Invalid regex in trigger_config.patterns: {pattern!r}") from exc
+    metadata = config.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise ValueError("trigger_config.metadata must be an object")
+
+
 class PolicyEngine:
     """
     Policy Engine for response guardrails.
@@ -65,7 +109,9 @@ class PolicyEngine:
 
     def __init__(self, db: AsyncSession, deployment_id: uuid.UUID | None = None):
         self.db = db
-        self.deployment_id = deployment_id
+        # Audit #87: default to the current deployment so evaluation/listing
+        # never picks up another deployment's policies on a shared database.
+        self.deployment_id = deployment_id if deployment_id is not None else default_deployment_id()
 
     async def get_active_policies(self, phase: str | None = None) -> list[ResponsePolicy]:
         """
@@ -166,12 +212,23 @@ class PolicyEngine:
         policies = await self.get_active_policies(phase="post")
 
         violations: list[dict[str, Any]] = []
+        # append_disclaimer actions never block and are not violations; they
+        # contribute text the caller appends to the reply. Single evaluation
+        # pass (audit #86 — previously evaluated twice and marked is_valid
+        # False for disclaimer-only matches).
+        append_texts: list[str] = []
 
         for policy in policies:
             if not self._evaluate_trigger(policy, response_content, conversation_metadata):
                 continue
 
             payload = policy.action_payload or {}
+            if policy.action == "append_disclaimer":
+                text = payload.get("disclaimer_text") or payload.get("message")
+                if text:
+                    append_texts.append(str(text))
+                continue
+
             default_severity = "error" if policy.action == "block" else "warning"
             violations.append(
                 {
@@ -188,19 +245,6 @@ class PolicyEngine:
                 "Post-generation policy violations",
                 violations=[v["policy_name"] for v in violations],
             )
-
-        # append_disclaimer actions never block; they contribute text the
-        # caller must append to the generated reply.
-        append_texts: list[str] = []
-        for policy in policies:
-            if policy.action != "append_disclaimer":
-                continue
-            if not self._evaluate_trigger(policy, response_content, conversation_metadata):
-                continue
-            payload = policy.action_payload or {}
-            text = payload.get("disclaimer_text") or payload.get("message")
-            if text:
-                append_texts.append(str(text))
 
         return {
             "is_valid": len(violations) == 0,
@@ -233,39 +277,85 @@ class PolicyEngine:
             True if the trigger matches, False otherwise.
         """
         config = policy.trigger_config or {}
+        if not isinstance(config, dict):
+            logger.warning("Malformed trigger_config skipped", policy_id=str(policy.id))
+            return False
         content_lower = content.lower()
 
-        # Keyword matching (also the MVP fallback for classifier/llm_intent
-        # triggers — they read the same trigger_config keys).
-        if any(keyword.lower() in content_lower for keyword in config.get("keywords", [])):
-            return True
+        # Defensive shape handling (audit #32): a malformed entry is skipped
+        # with a log, never raised — one bad policy must not outage the whole
+        # AI pipeline. Shapes are also validated at creation time.
+        keywords = config.get("keywords") or []
+        if not isinstance(keywords, list):
+            keywords = []
+        patterns = config.get("patterns") or []
+        if not isinstance(patterns, list):
+            patterns = []
+        topics_cfg = config.get("topics") or []
+        if not isinstance(topics_cfg, list):
+            topics_cfg = []
 
-        # Regex patterns
-        if any(
-            re.search(pattern, content, re.IGNORECASE) for pattern in config.get("patterns", [])
-        ):
-            return True
+        # Keyword matching (also the MVP fallback for classifier/llm_intent
+        # triggers — they read the same trigger_config keys). Word-boundary
+        # matching per audit #34.
+        matched = any(
+            _keyword_match(kw, content_lower) for kw in keywords if isinstance(kw, str)
+        )
+
+        # Regex patterns — invalid patterns are skipped, not raised.
+        if not matched:
+            for pattern in patterns:
+                if not isinstance(pattern, str):
+                    continue
+                try:
+                    if re.search(pattern, content, re.IGNORECASE):
+                        matched = True
+                        break
+                except re.error:
+                    logger.warning(
+                        "Invalid policy regex skipped",
+                        policy_id=str(policy.id),
+                        pattern=pattern,
+                    )
 
         # Topic detection (simple keyword lexicon for MVP). Topics may come
         # from trigger_config or the policy-level restricted_topics column.
-        topics = set(config.get("topics", [])) | set(policy.restricted_topics or [])
-        for topic in topics:
-            keywords = TOPIC_KEYWORDS.get(topic.lower())
-            if keywords and any(keyword in content_lower for keyword in keywords):
-                return True
+        if not matched:
+            topics = {t for t in topics_cfg if isinstance(t, str)} | set(
+                policy.restricted_topics or []
+            )
+            for topic in topics:
+                topic_keywords = TOPIC_KEYWORDS.get(topic.lower())
+                if topic_keywords and any(
+                    _keyword_match(kw, content_lower) for kw in topic_keywords
+                ):
+                    matched = True
+                    break
 
-        # Metadata conditions: all configured pairs must match.
+        # Metadata conditions (audit #33): a mandatory AND-gate whenever
+        # present — previously a keyword match short-circuited them, so a
+        # WhatsApp-only policy fired on every channel.
         meta_conditions = config.get("metadata")
+        if not isinstance(meta_conditions, dict):
+            meta_conditions = None
         if meta_conditions:
             if metadata is None:
                 return False
-            return all(metadata.get(key) == value for key, value in meta_conditions.items())
+            if not all(metadata.get(key) == value for key, value in meta_conditions.items()):
+                return False
 
-        return False
+        has_content_trigger = bool(keywords or patterns or topics_cfg or policy.restricted_topics)
+        if not has_content_trigger:
+            # Metadata-only policy: fires when all metadata conditions match.
+            return bool(meta_conditions)
+
+        return matched
 
     async def list_policies(self) -> list[dict[str, Any]]:
-        """List all response policies."""
+        """List this deployment's response policies (audit #87)."""
         query = select(ResponsePolicy).order_by(ResponsePolicy.priority.asc())
+        if self.deployment_id:
+            query = query.where(ResponsePolicy.deployment_id == self.deployment_id)
         result = await self.db.execute(query)
         policies = result.scalars().all()
 
@@ -315,6 +405,9 @@ class PolicyEngine:
             raise ValueError(f"Invalid action '{action}'. Valid: {sorted(VALID_ACTIONS)}")
         if applies_to not in VALID_PHASES:
             raise ValueError(f"Invalid applies_to '{applies_to}'. Valid: {sorted(VALID_PHASES)}")
+        # Audit #32: reject malformed trigger shapes / invalid regexes at
+        # creation instead of failing on every customer message at runtime.
+        validate_trigger_config(trigger_config)
 
         policy = ResponsePolicy(
             deployment_id=deployment_id or default_deployment_id(),
@@ -338,8 +431,15 @@ class PolicyEngine:
         return policy
 
     async def set_policy_active(self, policy_id: uuid.UUID, active: bool) -> ResponsePolicy | None:
-        """Activate or deactivate a policy. Returns None if not found."""
-        result = await self.db.execute(select(ResponsePolicy).where(ResponsePolicy.id == policy_id))
+        """Activate or deactivate a policy. Returns None if not found.
+
+        Scoped to this deployment (audit #87) so an admin cannot toggle
+        another deployment's policies by id on a shared database.
+        """
+        query = select(ResponsePolicy).where(ResponsePolicy.id == policy_id)
+        if self.deployment_id:
+            query = query.where(ResponsePolicy.deployment_id == self.deployment_id)
+        result = await self.db.execute(query)
         policy = result.scalar_one_or_none()
         if policy is None:
             return None
