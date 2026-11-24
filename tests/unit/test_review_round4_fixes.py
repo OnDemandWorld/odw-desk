@@ -427,16 +427,79 @@ class TestWebChatSocketHygiene:
 
 
 class TestTakeoverGuards:
-    """Terminal-status and concurrent-takeover rejections live in the endpoint;
-    exercised through the router module's HTTP surface would need heavy DB
-    scaffolding — assert the guard logic via the state machine + a light
-    source check instead."""
+    """Audit #70: behavioral tests replacing the old source-string grep —
+    the guards are exercised through the endpoint with a mocked DB, so an
+    inverted or removed condition actually fails the suite."""
 
-    def test_guards_present_in_endpoint_source(self):
-        import inspect
+    def _request(self):
+        request = MagicMock()
+        request.headers.get = lambda key, default="": default
+        return request
 
-        from desk.agents import inbox_api
+    def _db(self, conversation, agent):
+        conv_result = MagicMock()
+        conv_result.scalar_one_or_none.return_value = conversation
+        agent_result = MagicMock()
+        agent_result.scalar_one_or_none.return_value = agent
+        db = MagicMock()
+        db.execute = AsyncMock(side_effect=[conv_result, agent_result])
+        return db
 
-        src = inspect.getsource(inbox_api)
-        assert "already taken over by another agent" in src
-        assert "cannot be taken over" in src
+    async def test_terminal_status_rejected(self):
+        from fastapi import HTTPException
+
+        from desk.agents.inbox_api import take_over_conversation
+        from desk.conversations.state_machine import ConversationStatus
+
+        conv = MagicMock()
+        conv.status = ConversationStatus.RESOLVED
+        conv.assigned_agent_id = None
+        agent_id = uuid.uuid4()
+        agent = MagicMock()
+        agent.id = agent_id
+        with pytest.raises(HTTPException) as exc:
+            await take_over_conversation(
+                conversation_id=uuid.uuid4(),
+                request=self._request(),
+                agent_id=agent_id,
+                db=self._db(conv, agent),
+            )
+        assert exc.value.status_code == 409
+        assert "cannot be taken over" in exc.value.detail
+
+    async def test_assigned_to_other_agent_rejected(self):
+        from fastapi import HTTPException
+
+        from desk.agents.inbox_api import take_over_conversation
+        from desk.conversations.state_machine import ConversationStatus
+
+        conv = MagicMock()
+        conv.status = ConversationStatus.ACTIVE
+        conv.assigned_agent_id = uuid.uuid4()  # someone else owns it
+        agent_id = uuid.uuid4()
+        agent = MagicMock()
+        agent.id = agent_id
+        with pytest.raises(HTTPException) as exc:
+            await take_over_conversation(
+                conversation_id=uuid.uuid4(),
+                request=self._request(),
+                agent_id=agent_id,
+                db=self._db(conv, agent),
+            )
+        assert exc.value.status_code == 409
+        assert "already taken over by another agent" in exc.value.detail
+
+    async def test_unknown_conversation_404(self):
+        from fastapi import HTTPException
+
+        from desk.agents.inbox_api import take_over_conversation
+
+        db = self._db(None, None)
+        with pytest.raises(HTTPException) as exc:
+            await take_over_conversation(
+                conversation_id=uuid.uuid4(),
+                request=self._request(),
+                agent_id=uuid.uuid4(),
+                db=db,
+            )
+        assert exc.value.status_code == 404

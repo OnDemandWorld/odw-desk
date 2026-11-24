@@ -11,8 +11,10 @@ services:
       POSTGRES_DB: desk
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # Audit #65: loopback-only — dev credentials must not be reachable from
+    # the office network / cloud VM neighbors.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U desk -d desk"]
       interval: 5s
@@ -24,7 +26,7 @@ services:
     container_name: desk-redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -32,7 +34,9 @@ services:
       retries: 5
 
   minio:
-    image: minio/minio:latest
+    # Audit #96: pinned release — 'latest' silently changed behavior across
+    # pulls on unchanged commits.
+    image: minio/minio:RELEASE.2024-01-16T16-07-38Z
     container_name: desk-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -42,8 +46,8 @@ services:
     volumes:
       - minio_data:/data
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -56,6 +60,8 @@ services:
       dockerfile: Dockerfile.api
     container_name: desk-api
     restart: unless-stopped
+    # Dev-only reload override (audit #64: not baked into the image).
+    command: ["uvicorn", "desk.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     environment:
       ENVIRONMENT: development
       DATABASE_URL: postgresql+asyncpg://desk:desk@postgres:5432/desk

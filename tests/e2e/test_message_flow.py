@@ -94,28 +94,50 @@ class TestEndToEndMessageFlow:
             ],
         }
 
-        # Calculate HMAC signature
+        # Audit #69: sign the EXACT bytes transmitted (json.dumps), using the
+        # server's configured app secret — the old test signed str(payload)
+        # (Python repr) while sending httpx-serialized JSON, so the signature
+        # never matched and only passed because dev skips verification.
         import hashlib
         import hmac
+        import json
 
-        secret = "dev_secret_key_change_me"
-        payload_bytes = str(payload).encode()
-        signature = hmac.new(secret.encode(), payload_bytes, hashlib.sha256).hexdigest()
+        from desk.config import get_settings
+
+        body = json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json"}
+        secret = get_settings().whatsapp_app_secret
+        if secret:
+            signature = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+            headers["X-Hub-Signature-256"] = f"sha256={signature}"
 
         response = await client.post(
-            "/api/v1/webhooks/whatsapp",
-            json=payload,
-            headers={"X-Hub-Signature-256": f"sha256={signature}"},
+            "/api/v1/webhooks/whatsapp", content=body, headers=headers
         )
 
         assert response.status_code == 200
 
-        # Wait for async processing
-        await asyncio.sleep(2)
+        # Audit #69: assert a real pipeline outcome — the inbound message must
+        # be persisted (previously nothing downstream was verified at all).
+        from sqlalchemy import select
 
-        # Verify conversation was created (would need DB access or API endpoint)
-        # This is a simplified E2E test - full implementation would verify
-        # database state and outbound message dispatch
+        from desk.db import AsyncSessionLocal
+        from desk.models.message import Message
+
+        persisted = None
+        for _ in range(40):  # bounded poll, ~10s
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(Message).where(Message.channel_message_id == message_id)
+                )
+                persisted = result.scalars().first()
+            if persisted is not None:
+                break
+            await asyncio.sleep(0.25)
+
+        assert persisted is not None, "inbound message was never persisted"
+        assert persisted.content == message_text
+        assert persisted.sender_type == "customer"
 
     @pytest.mark.asyncio
     async def test_agent_inbox_list_conversations(self, client):

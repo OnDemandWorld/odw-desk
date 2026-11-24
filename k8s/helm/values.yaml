@@ -56,11 +56,13 @@ tolerations: []
 affinity: {}
 
 # PostgreSQL configuration
+# Audit #66: do NOT ship working default credentials — override at install
+# time (or reference an existing Secret).
 postgresql:
   enabled: true
   auth:
     username: desk
-    password: desk
+    password: ""  # REQUIRED: set a strong password at install time
     database: desk
   primary:
     persistence:
@@ -68,10 +70,12 @@ postgresql:
       size: 10Gi
 
 # Redis configuration
+# Audit #66: Redis holds event streams and must not be passwordless.
 redis:
   enabled: true
   auth:
-    enabled: false
+    enabled: true
+    password: ""  # REQUIRED: set at install time
   master:
     persistence:
       enabled: true
@@ -84,7 +88,13 @@ config:
   logLevel: INFO
   databaseUrl: postgresql+asyncpg://desk:desk@postgresql:5432/desk
   redisUrl: redis://redis-master:6379/0
-  secretKey: change-me-in-production
+  # Audit #66/#1: REQUIRED at install time — generate with `openssl rand -hex
+  # 32`. A placeholder/padded key is publicly known and lets anyone forge
+  # admin JWTs. The app rejects keys shorter than 32 chars at startup.
+  secretKey: ""
+  # REQUIRED in production: shared key guarding admin/agent APIs. Without it
+  # only JWT bearers are accepted (fail closed); set it for shared-key mode.
+  deskApiKey: ""
   whatsappAccessToken: ""
   whatsappPhoneNumberId: ""
   whatsappWebhookVerifyToken: ""
