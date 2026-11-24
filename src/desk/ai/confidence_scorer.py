@@ -14,6 +14,11 @@ from desk.ai.vault_client import RetrievedDocument
 
 logger = structlog.get_logger()
 
+# Audit #54: absolute grounding calibration — a good Vault RRF fused_score
+# lands around 0.016 (empirical, see D-19 calibration test). Best hits far
+# below this scale the relevance factor down toward zero.
+RRF_GOOD_HIT_SCORE = 0.016
+
 
 @dataclass
 class ConfidenceScore:
@@ -156,7 +161,14 @@ class ConfidenceScorer:
         # Relative to the strongest hit — rank-based scales carry no
         # absolute meaning, but "everything close to the best hit" does.
         avg_score = sum(doc.score for doc in documents) / len(documents)
-        return min(1.0, avg_score / best)
+        relative = min(1.0, avg_score / best)
+        # Audit #54: scale by ABSOLUTE best-hit quality. Purely relative
+        # scoring gave a single barely-matching chunk (fused_score 0.0001)
+        # relevance 1.0 — higher than a Vault outage (0.3) — auto-sending
+        # ungrounded answers with high confidence. Calibrated to the
+        # empirically good RRF hit (~0.016, see D-19 calibration test).
+        absolute = min(1.0, best / RRF_GOOD_HIT_SCORE)
+        return relative * absolute
 
     def _score_completeness(self, response_text: str) -> float:
         """Score based on response completeness."""
@@ -215,6 +227,20 @@ class ConfidenceScorer:
         """Score based on response length appropriateness."""
         if not response_text:
             return 0.0
+
+        # Audit #55: Chinese text has no word-delimiting spaces — whitespace
+        # word counts scored every CJK reply as ~1 word ("too short", 0.3).
+        # Use CJK character counts for Chinese/mixed replies.
+        cjk_count = sum(1 for ch in response_text if "一" <= ch <= "鿿")
+        if cjk_count > 0:
+            if cjk_count < 15:
+                return 0.3
+            elif cjk_count > 600:
+                return 0.5
+            elif 30 <= cjk_count <= 300:
+                return 1.0
+            else:
+                return 0.7
 
         word_count = len(response_text.split())
 

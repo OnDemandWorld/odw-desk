@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from desk.ai.confidence_scorer import ConfidenceScore, ConfidenceScorer
 from desk.ai.model_router import ModelTarget, RoutingDecision, get_model_router
-from desk.ai.pii_shield import PIIResult, RoutingDirective, get_pii_shield
+from desk.ai.pii_shield import PIIResult, get_pii_shield
 from desk.ai.prompt_builder import PromptBuilder
 from desk.ai.providers.base import LLMProvider, LLMRequest
 from desk.ai.providers.ollama import OllamaProvider
@@ -356,13 +356,16 @@ class AIEngine:
                 # Step 3: Vault Retrieval (knowledge base)
                 knowledge_docs: list[RetrievedDocument] = []
                 try:
-                    if not pii_result.pii_detected or pii_result.routing_directive == RoutingDirective.REDACTED_FRONTIER_OK:
-                        # Only retrieve knowledge if safe to do so
-                        knowledge_docs = await self.vault_client.retrieve(
-                            query=pii_result.redacted_text if pii_result.pii_detected else content,
-                            top_k=5,
-                        )
-                        logger.info("Knowledge retrieval complete", documents=len(knowledge_docs))
+                    # Audit #53: Vault is operator-local, so retrieval is safe
+                    # even for LOCAL_MODEL_ONLY turns (query is redacted when
+                    # PII was detected). Skipping it capped every PII-bearing
+                    # message at confidence 0.56 — below the escalation
+                    # threshold — so the AI could never answer them.
+                    knowledge_docs = await self.vault_client.retrieve(
+                        query=pii_result.redacted_text if pii_result.pii_detected else content,
+                        top_k=5,
+                    )
+                    logger.info("Knowledge retrieval complete", documents=len(knowledge_docs))
                 except Exception as e:
                     logger.warning("Knowledge retrieval failed (continuing without)", error=str(e))
                     # Continue without knowledge

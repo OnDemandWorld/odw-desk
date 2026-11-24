@@ -14,6 +14,8 @@ import structlog
 from presidio_analyzer import AnalyzerEngine, RecognizerResult
 from presidio_anonymizer import AnonymizerEngine
 
+from desk.i18n.detect import detect_language
+
 logger = structlog.get_logger()
 
 # Presidio ships English-focused recognizers only; with language="en" Chinese
@@ -21,7 +23,13 @@ logger = structlog.get_logger()
 # critical gap for a suite whose primary users write Chinese (R1 acceptance,
 # 2026-09-12). These regex recognizers merge into the Presidio result set.
 _CN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("PHONE_NUMBER", re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")),
+    # Audit #56: accept the +86/86 country-code prefix — the old lookbehind
+    # rejected '+8613812345678' because the '1' was preceded by '6', so the
+    # most common international format of CN mobiles reached frontier models.
+    ("PHONE_NUMBER", re.compile(r"(?<!\d)(?:\+?86)?1[3-9]\d{9}(?!\d)")),
+    # Separator-formatted mobiles ('138 1234 5678', '138-1234-5678');
+    # _cn_recognizer_results validates the digit count (must be 11).
+    ("PHONE_NUMBER", re.compile(r"(?<!\d)1[3-9][\d \-]{9,13}(?!\d)")),
     ("PHONE_NUMBER", re.compile(r"(?<!\d)0\d{2,3}-?\d{7,8}(?!\d)")),
     (
         "ID_CARD",
@@ -36,6 +44,13 @@ def _cn_recognizer_results(text: str) -> list:
     for entity_type, pattern in _CN_PATTERNS:
         for m in pattern.finditer(text):
             start, end = m.span()
+            matched = m.group()
+            # Separator-tolerant mobile matches must contain exactly 11 digits
+            # (audit #56) — otherwise '138' + arbitrary digits/spaces would
+            # produce false positives.
+            if (" " in matched or "-" in matched) and entity_type == "PHONE_NUMBER":
+                if sum(ch.isdigit() for ch in matched) != 11:
+                    continue
             if any(r.start <= start and end <= r.end for r in found):
                 continue
             found.append(RecognizerResult(entity_type=entity_type, start=start, end=end, score=1.0))
@@ -204,6 +219,14 @@ class PIIShield:
 
             # Determine routing directive
             routing_directive = self._determine_routing(pii_detected)
+
+            # Audit #57: detection coverage is English NER + CN regexes only.
+            # Chinese names/addresses in mixed-language text pass undetected;
+            # fail closed to LOCAL_MODEL_ONLY for non-English text instead of
+            # NO_RESTRICTION. (The language heuristic distinguishes en/zh;
+            # other languages remain a coverage gap — see audit report.)
+            if not pii_detected and detect_language(text) != "en":
+                routing_directive = RoutingDirective.LOCAL_MODEL_ONLY
 
             # Build entity details for logging
             pii_entities = [
