@@ -109,6 +109,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:  # noqa: BLE001 - never block startup on licensing
         logger.warning("License initialization failed (gates fail open)", error=str(exc))
 
+    # Load persisted runtime overrides (audit #35): load_all previously had no
+    # callers, so admin-configured Vault/PII/WhatsApp settings were silently
+    # lost on every restart and readers fell back to env defaults.
+    try:
+        from desk.admin.runtime_settings import load_all
+
+        async with AsyncSessionLocal() as settings_db:
+            await load_all(settings_db)
+    except Exception as exc:  # noqa: BLE001 - env defaults remain usable
+        logger.warning("Runtime settings load failed (using env defaults)", error=str(exc))
+
     # Initialize channel adapter manager (INFRA-006)
     channel_manager = ChannelAdapterManager(event_bus, redis_manager)
     app.state.channel_manager = channel_manager

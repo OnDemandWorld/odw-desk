@@ -170,9 +170,20 @@ Keep responses concise and focused on resolving the customer's issue."""
             for persona in personas
         ]
 
-    async def activate_persona(self, persona_id: UUID) -> None:
-        """Activate a persona (deactivate all others)."""
-        # Deactivate all personas
+    async def activate_persona(self, persona_id: UUID) -> bool:
+        """Activate a persona (deactivate all others).
+
+        Returns False when the persona does not exist — without touching any
+        row. Previously an unknown id deactivated ALL personas and the
+        session auto-commit persisted the mass deactivation (audit #30).
+        """
+        # Look up the target FIRST; never mutate anything for an unknown id.
+        persona = await self.get_persona_by_id(persona_id)
+        if persona is None:
+            logger.warning("Persona activation failed: not found", persona_id=str(persona_id))
+            return False
+
+        # Deactivate all personas, then activate the target in one transaction.
         query = select(BrandPersona)
         result = await self.db.execute(query)
         all_personas = result.scalars().all()
@@ -180,9 +191,7 @@ Keep responses concise and focused on resolving the customer's issue."""
         for active_persona in all_personas:
             active_persona.is_active = False
 
-        # Activate the specified persona
-        persona = await self.get_persona_by_id(persona_id)
-        if persona:
-            persona.is_active = True
-            await self.db.commit()
-            logger.info("Persona activated", persona_id=str(persona_id), name=persona.name)
+        persona.is_active = True
+        await self.db.commit()
+        logger.info("Persona activated", persona_id=str(persona_id), name=persona.name)
+        return True

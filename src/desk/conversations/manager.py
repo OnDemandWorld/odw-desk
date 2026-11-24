@@ -196,10 +196,13 @@ class ConversationManager:
         conversation.status = new_status
 
         if reason:
-            # Update metadata with reason
-            metadata = conversation.metadata_ or {}
-            metadata["last_status_change_reason"] = reason
-            conversation.metadata_ = metadata
+            # Assign a NEW dict: plain JSONB does not track in-place mutation,
+            # and reassigning the same object emits no UPDATE (audit #29 — the
+            # reason was silently dropped on conversations with metadata).
+            conversation.metadata_ = {
+                **(conversation.metadata_ or {}),
+                "last_status_change_reason": reason,
+            }
 
         if new_status == ConversationStatus.RESOLVED:
             await self._mark_resolution(conversation)

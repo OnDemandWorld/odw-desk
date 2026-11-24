@@ -29,6 +29,31 @@ router = APIRouter(prefix="/api/v1/webhooks", tags=["WhatsApp"])
 # Default Meta Graph API base URL for the WhatsApp Cloud API.
 DEFAULT_GRAPH_API_BASE_URL = "https://graph.facebook.com/v19.0"
 
+
+def _effective_whatsapp_config() -> dict[str, str]:
+    """
+    Resolve WhatsApp credentials: persisted setup override over env settings.
+
+    Audit #36: POST /setup/whatsapp persisted a 'whatsapp' system_settings row
+    that no component ever read, so the setup wizard was a silent no-op.
+    Readers now consult the override (loaded at startup, audit #35) with env
+    fallback.
+    """
+    from desk.admin.runtime_settings import get_override
+
+    settings = get_settings()
+    override = get_override("whatsapp") or {}
+    return {
+        "access_token": override.get("access_token") or settings.whatsapp_access_token,
+        "phone_number_id": override.get("phone_number_id") or settings.whatsapp_phone_number_id,
+        "business_account_id": (
+            override.get("business_account_id") or settings.whatsapp_business_account_id
+        ),
+        "webhook_verify_token": (
+            override.get("webhook_verify_token") or settings.whatsapp_webhook_verify_token
+        ),
+    }
+
 # WhatsApp message types that carry a media payload (id / mime_type / caption).
 MEDIA_MESSAGE_TYPES = ("image", "document", "audio", "video")
 
@@ -74,8 +99,9 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
         """
         self.health_status.messages_sent += 1
 
-        access_token = self.settings.whatsapp_access_token
-        phone_number_id = self.settings.whatsapp_phone_number_id
+        wa_cfg = _effective_whatsapp_config()
+        access_token = wa_cfg["access_token"]
+        phone_number_id = wa_cfg["phone_number_id"]
 
         if not access_token or not phone_number_id:
             logger.warning(
@@ -171,8 +197,9 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
         """
         self.health_status.messages_sent += 1
 
-        access_token = self.settings.whatsapp_access_token
-        phone_number_id = self.settings.whatsapp_phone_number_id
+        wa_cfg = _effective_whatsapp_config()
+        access_token = wa_cfg["access_token"]
+        phone_number_id = wa_cfg["phone_number_id"]
 
         if not access_token or not phone_number_id:
             logger.warning(
@@ -255,7 +282,7 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
         download ``url``. Injectable/mockable via ``graph_api_base_url``. Returns
         None when credentials are missing or the lookup fails (best-effort).
         """
-        access_token = self.settings.whatsapp_access_token
+        access_token = _effective_whatsapp_config()["access_token"]
         if not access_token:
             logger.warning(
                 "WhatsApp credentials not configured; cannot resolve media URL",
@@ -459,11 +486,10 @@ async def whatsapp_verification(
     spec, the hub.challenge value must be echoed back as the raw plain-text
     body (JSON-quoting it fails verification).
     """
-    settings = get_settings()
     if hub_mode != "subscribe":
         raise HTTPException(status_code=400, detail="Invalid hub.mode")
 
-    if hub_verify_token != settings.whatsapp_webhook_verify_token:
+    if hub_verify_token != _effective_whatsapp_config()["webhook_verify_token"]:
         raise HTTPException(status_code=403, detail="Invalid verify token")
 
     if hub_challenge is None:

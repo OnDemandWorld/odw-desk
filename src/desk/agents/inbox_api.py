@@ -628,10 +628,10 @@ async def provide_ai_feedback(
             detail="Feedback can only be provided on AI messages",
         )
 
-    # Update metadata with feedback
-    metadata = message.metadata_ or {}
-    metadata["agent_feedback"] = feedback
-    message.metadata_ = metadata
+    # Update metadata with feedback. Assign a NEW dict: plain JSONB does not
+    # track in-place mutation, and reassigning the same object emits no UPDATE
+    # (audit #28 — feedback was silently never persisted).
+    message.metadata_ = {**(message.metadata_ or {}), "agent_feedback": feedback}
 
     await db.commit()
 

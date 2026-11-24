@@ -179,7 +179,9 @@ async def activate_persona(
 ) -> dict[str, Any]:
     """Activate a brand persona."""
     service = PersonaService(db)
-    await service.activate_persona(persona_id)
+    activated = await service.activate_persona(persona_id)
+    if not activated:
+        raise HTTPException(status_code=404, detail="Persona not found")
     return {"success": True, "message": "Persona activated"}
 
 
