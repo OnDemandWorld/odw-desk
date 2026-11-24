@@ -153,6 +153,7 @@ class TestRouterMediaPersistence:
     def _router_with_mocks(self):
         router = MessageRouter(MagicMock(), MagicMock())
         router.event_bus.publish = AsyncMock()
+        router.db.commit = AsyncMock()  # route() commits before publish (audit #7)
         # Redelivery-dedup probe (route() checks channel_message_id before
         # inserting): no existing row.
         dup_result = MagicMock()

@@ -74,8 +74,9 @@ class Settings(BaseSettings):
     desk_api_key: str = Field(
         default="",
         description=(
-            "Optional API key guarding /api/v1/admin/* and /api/v1/agents/*. "
-            "When empty, those routes stay open (backward compatible / dev)."
+            "API key guarding /api/v1/admin/* and /api/v1/agents/*. "
+            "When empty, those routes stay open ONLY in development; in "
+            "staging/production a valid JWT bearer is required (fail closed)."
         ),
     )
     desk_default_role: Literal["admin", "agent"] = Field(

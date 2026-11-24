@@ -14,6 +14,7 @@ from uuid import NAMESPACE_DNS, UUID, uuid5
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
+from pydantic import BaseModel
 from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.selectable import Select
@@ -95,11 +96,35 @@ async def get_setup_status(db: AsyncSession = Depends(get_db)) -> dict[str, Any]
     }
 
 
+class VaultSetupRequest(BaseModel):
+    """Vault setup payload. Secrets travel in the body, never the URL (audit #2)."""
+
+    vault_url: str
+    vault_api_key: str
+    collection_id: str
+
+
+class WhatsAppSetupRequest(BaseModel):
+    """WhatsApp setup payload (secrets in body, not query string — audit #2)."""
+
+    access_token: str
+    phone_number_id: str
+    business_account_id: str
+    webhook_verify_token: str
+
+
+class AIModelSetupRequest(BaseModel):
+    """AI model setup payload (secrets in body, not query string — audit #2)."""
+
+    provider: str
+    model_name: str
+    api_key: str | None = None
+    endpoint: str | None = None
+
+
 @router.post("/setup/vault")
 async def configure_vault(
-    vault_url: str = Query(..., description="Vault API URL"),
-    vault_api_key: str = Query(..., description="Vault API key"),
-    collection_id: str = Query(..., description="Default collection ID"),
+    payload: VaultSetupRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Configure Vault connection (persisted; takes effect immediately)."""
@@ -107,30 +132,27 @@ async def configure_vault(
         db,
         "vault",
         {
-            "vault_url": vault_url,
-            "vault_api_key": vault_api_key,
-            "vault_collection_id": collection_id,
+            "vault_url": payload.vault_url,
+            "vault_api_key": payload.vault_api_key,
+            "vault_collection_id": payload.collection_id,
         },
     )
     # Drop the cached client so the next retrieval rebuilds with the override.
     from desk.ai.vault_client import reset_vault_client
 
     reset_vault_client()
-    logger.info("Vault configured", vault_url=vault_url, collection_id=collection_id)
+    logger.info("Vault configured", vault_url=payload.vault_url, collection_id=payload.collection_id)
     return {
         "success": True,
         "message": "Vault configuration saved",
-        "vault_url": vault_url,
-        "collection_id": collection_id,
+        "vault_url": payload.vault_url,
+        "collection_id": payload.collection_id,
     }
 
 
 @router.post("/setup/whatsapp")
 async def configure_whatsapp(
-    access_token: str = Query(..., description="WhatsApp access token"),
-    phone_number_id: str = Query(..., description="Phone number ID"),
-    business_account_id: str = Query(..., description="Business account ID"),
-    webhook_verify_token: str = Query(..., description="Webhook verify token"),
+    payload: WhatsAppSetupRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Configure WhatsApp Business API (persisted; channel picks it up on restart)."""
@@ -138,29 +160,30 @@ async def configure_whatsapp(
         db,
         "whatsapp",
         {
-            "access_token": access_token,
-            "phone_number_id": phone_number_id,
-            "business_account_id": business_account_id,
-            "webhook_verify_token": webhook_verify_token,
+            "access_token": payload.access_token,
+            "phone_number_id": payload.phone_number_id,
+            "business_account_id": payload.business_account_id,
+            "webhook_verify_token": payload.webhook_verify_token,
         },
     )
-    logger.info("WhatsApp configured", phone_number_id=phone_number_id)
+    logger.info("WhatsApp configured", phone_number_id=payload.phone_number_id)
     return {
         "success": True,
         "message": "WhatsApp configuration saved (applies on service restart)",
-        "phone_number_id": phone_number_id,
+        "phone_number_id": payload.phone_number_id,
     }
 
 
 @router.post("/setup/ai-model")
 async def configure_ai_model(
-    provider: str = Query(..., description="Model provider (ollama, openai, anthropic)"),
-    model_name: str = Query(..., description="Model name"),
-    api_key: str = Query(None, description="API key (if required)"),
-    endpoint: str = Query(None, description="Endpoint URL (if required)"),
+    payload: AIModelSetupRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Configure AI model."""
+    provider = payload.provider
+    model_name = payload.model_name
+    api_key = payload.api_key
+    endpoint = payload.endpoint
     if provider in _UNSUPPORTED_PROVIDERS:
         raise HTTPException(
             status_code=400,

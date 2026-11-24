@@ -112,6 +112,15 @@ class MessageRouter:
                 "status": "duplicate",
             }
 
+        # Audit #7: commit BEFORE publishing. Previously the event went to
+        # Redis inside the request transaction while get_db committed only
+        # after the 200 response was sent (FastAPI >= 0.111) — a commit
+        # failure after a 200 meant the provider never redelivered and the
+        # message was lost (orphan event, rolled-back inbound row). Committing
+        # first makes a failure surface as non-2xx so providers redeliver, and
+        # the dedup check above makes redelivery idempotent.
+        await self.db.commit()
+
         # Publish routing event to event bus for AI processing
         await self.event_bus.publish(
             "conversation.routed",

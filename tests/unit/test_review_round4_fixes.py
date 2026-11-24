@@ -124,6 +124,7 @@ class TestRouterIdempotency:
         dup_result.scalar_one_or_none.return_value = existing_id
         router.db.execute = AsyncMock(return_value=dup_result)
         router.event_bus.publish = AsyncMock()
+        router.db.commit = AsyncMock()  # route() commits before publish (audit #7)
 
         customer = MagicMock()
         customer.id = uuid.uuid4()

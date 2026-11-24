@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from desk.config import get_settings
@@ -69,9 +70,15 @@ class ConversationManager:
         # most one row per thread, so a resolved/closed conversation can never
         # be re-created — creating one raised IntegrityError and lost the
         # customer's message (webhook 500).
+        #
+        # Audit #5: the lookup must NOT filter by customer_id — the unique
+        # constraint is global per thread. On multi-participant email threads
+        # a second sender resolves to a different customer; a customer-scoped
+        # lookup missed the existing row and the INSERT violated the global
+        # constraint on every relay retry (permanent 500 + message loss).
+        # Thread identity is defined by the constraint, so match it exactly.
         result = await self.db.execute(
             select(Conversation)
-            .where(Conversation.customer_id == customer.id)
             .where(Conversation.channel == channel)
             .where(Conversation.channel_conversation_id == channel_conversation_id)
             .order_by(Conversation.updated_at.desc())
@@ -104,7 +111,23 @@ class ConversationManager:
             confidence_threshold=get_settings().confidence_threshold,
         )
         self.db.add(conversation)
-        await self.db.flush()
+        try:
+            await self.db.flush()
+        except IntegrityError:
+            # Concurrent creation race (audit #5): two requests for the same
+            # new thread both missed the lookup; the loser re-reads the
+            # winner's row instead of 500ing (mirrors CustomerResolver).
+            await self.db.rollback()
+            retry = await self.db.execute(
+                select(Conversation)
+                .where(Conversation.channel == channel)
+                .where(Conversation.channel_conversation_id == channel_conversation_id)
+                .limit(1)
+            )
+            existing = retry.scalar_one_or_none()
+            if existing is None:
+                raise
+            return existing
 
         return conversation
 
