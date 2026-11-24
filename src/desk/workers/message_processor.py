@@ -141,7 +141,10 @@ class MessageProcessor:
             # webhooks commit via get_db). Wait until the freshly routed
             # conversation is visible on this session's connection, otherwise
             # the reply is silently dropped and the event still acked.
-            await self._wait_for_visible_conversation(conversation_id)
+            if not await self._wait_for_visible_conversation(conversation_id):
+                # Audit #43: do not run inference or ack — leave the entry
+                # pending so claim-based recovery redelivers it after commit.
+                return
 
             # Re-read state at processing time: a human may have taken over
             # between routing and now. ``ai_enabled`` is flipped off by
@@ -212,17 +215,21 @@ class MessageProcessor:
         except Exception as e:
             logger.error("Failed to process message", error=str(e), conversation_id=conversation_id)
             # Move the failed event to the dead-letter stream so it can be
-            # inspected and replayed instead of being silently dropped, then
-            # ack it to avoid re-processing the poison event forever.
+            # inspected and replayed instead of being silently dropped.
+            # Audit #42: ack ONLY after the DLQ write succeeded — otherwise
+            # the event stays pending for claim-based recovery (#8) instead
+            # of vanishing from both the PEL and the DLQ.
+            dlq_ok = False
             try:
                 await self.event_bus.dead_letter(
                     "conversation.routed",
                     {"event_id": event_id, "payload": payload},
                     reason=f"processing failed: {e}",
                 )
+                dlq_ok = True
             except Exception as dlq_error:  # noqa: BLE001
                 logger.error("Failed to dead-letter event", error=str(dlq_error))
-            if event_id:
+            if event_id and dlq_ok:
                 await self.event_bus.acknowledge(
                     "conversation.routed",
                     "ai-processors",
@@ -231,34 +238,39 @@ class MessageProcessor:
 
     async def _wait_for_visible_conversation(
         self, conversation_id: str | None, attempts: int = 10, delay: float = 0.2
-    ) -> None:
+    ) -> bool:
         """
         Poll until the routed conversation is committed and visible to us.
 
         The processor runs on a separate session/connection, so uncommitted
-        rows from the routing transaction are invisible. Polls for ~2s before
-        giving up (a truly bogus event still acks quickly afterwards).
+        rows from the routing transaction are invisible. Polls for ~2s.
+
+        Returns True when visible (or the id is unusable — caller handles the
+        not-found path), False when still invisible. Audit #43: on False the
+        caller must NOT ack — the entry stays pending and claim-based
+        recovery (#8) redelivers it once the routing transaction commits.
         """
         if not conversation_id:
-            return
+            return True
         from uuid import UUID as UUIDType
 
         try:
             conv_uuid = UUIDType(str(conversation_id))
         except (ValueError, AttributeError):
-            return
+            return True
         async with AsyncSessionLocal() as session:
             for _ in range(attempts):
                 result = await session.execute(
                     select(Conversation.id).where(Conversation.id == conv_uuid)
                 )
                 if result.scalar_one_or_none() is not None:
-                    return
+                    return True
                 await asyncio.sleep(delay)
         logger.warning(
-            "Conversation still invisible after commit-wait; continuing",
+            "Conversation still invisible after commit-wait; leaving pending",
             conversation_id=conversation_id,
         )
+        return False
 
     async def _conversation_ai_enabled(self, conversation_id: str | None) -> bool | None:
         """Re-read ``ai_enabled`` for a conversation.

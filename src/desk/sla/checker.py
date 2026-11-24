@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 from desk.agents.websocket import broadcast_escalation
 from desk.events.bus import EventBus
 from desk.models.conversation import Conversation
+from desk.models.message import Message
 from desk.observability.metrics import ESCALATIONS
 from desk.sla.service import ACTIVE_STATUSES, SLAService, SLAStatus
 
@@ -41,10 +42,15 @@ async def scan_due_conversations(
     # Eager-load messages: the SLA evaluation reads the conversation's
     # message timestamps, and a lazy load inside this async context would
     # fail with MissingGreenlet — the scan then never escalates anything.
+    # Audit #46: load ONLY the columns evaluate() needs (sender_type,
+    # created_at) — hydrating full message content for every active
+    # conversation every interval pressured DB, memory and the event loop.
     result = await db.execute(
         select(Conversation)
         .where(Conversation.status.in_(ACTIVE_STATUSES))
-        .options(selectinload(Conversation.messages))
+        .options(
+            selectinload(Conversation.messages).load_only(Message.sender_type, Message.created_at)
+        )
     )
     conversations = result.scalars().all()
 

@@ -12,6 +12,12 @@ from redis import exceptions as redis_exceptions
 from desk.events.bus import EventBus
 from desk.utils.redis_client import RedisConnectionManager
 
+# Audit #45: bounded stream retention — without MAXLEN, conversation.routed
+# (full message content per entry) and the DLQs grow until Redis OOMs and the
+# whole pipeline stalls. Approximate trimming keeps XADD cheap.
+STREAM_MAXLEN = 100_000
+DLQ_MAXLEN = 10_000
+
 
 class RedisStreamsEventBus(EventBus):
     """
@@ -44,7 +50,9 @@ class RedisStreamsEventBus(EventBus):
         """
         event_json = json.dumps(event)
         async with self.redis_manager.get_client() as client:
-            message_id = await client.xadd(stream, {"payload": event_json})
+            message_id = await client.xadd(
+                stream, {"payload": event_json}, maxlen=STREAM_MAXLEN, approximate=True
+            )
             return str(message_id)
 
     async def subscribe(
@@ -209,4 +217,9 @@ class RedisStreamsEventBus(EventBus):
             "payload": event,
         }
         async with self.redis_manager.get_client() as client:
-            await client.xadd(dlq_stream, {"payload": json.dumps(dlq_event)})
+            await client.xadd(
+                dlq_stream,
+                {"payload": json.dumps(dlq_event)},
+                maxlen=DLQ_MAXLEN,
+                approximate=True,
+            )

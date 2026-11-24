@@ -165,11 +165,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     async def sla_scanner_loop() -> None:
         while True:
             try:
-                async with AsyncSessionLocal() as session:
-                    summary = await scan_due_conversations(session, event_bus=app.state.event_bus)
-                    await session.commit()
-                if summary.get("breached"):
-                    logger.info("SLA scan found breaches", **summary)
+                # Audit #46: only one scanner across workers/replicas — a
+                # Redis SET NX lock prevents duplicated full-table scans and
+                # racing double escalations of the same conversation.
+                async with redis_manager.get_client() as client:
+                    acquired = await client.set(
+                        "desk:sla:scanner:lock",
+                        "1",
+                        nx=True,
+                        ex=settings.sla_scan_interval_seconds,
+                    )
+                if acquired:
+                    async with AsyncSessionLocal() as session:
+                        summary = await scan_due_conversations(
+                            session, event_bus=app.state.event_bus
+                        )
+                        await session.commit()
+                    if summary.get("breached"):
+                        logger.info("SLA scan found breaches", **summary)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001

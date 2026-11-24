@@ -92,6 +92,11 @@ class TestAiEnabledFlag:
             return False
 
         monkeypatch.setattr(processor, "_conversation_ai_enabled", fake_enabled)
+        # Audit #43: visibility wait now returns bool and gates processing;
+        # stub it visible so this unit test never touches a real database.
+        monkeypatch.setattr(
+            processor, "_wait_for_visible_conversation", AsyncMock(return_value=True)
+        )
         event_bus = MagicMock()
         event_bus.acknowledge = AsyncMock()
         processor.event_bus = event_bus

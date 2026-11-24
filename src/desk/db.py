@@ -7,6 +7,7 @@ dependency.
 """
 
 import asyncio
+import weakref
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import (
@@ -22,7 +23,13 @@ from desk.config import get_settings
 # per request — the previous behavior — opened a fresh pool each time and
 # exhausted PostgreSQL's connection slots under concurrent load
 # (TooManyConnectionsError, found via 100-user load testing).
-_engines: dict[int, AsyncEngine] = {}
+# Audit #44: key by the loop OBJECT with weak references — id(loop) can be
+# reused after a loop is garbage-collected, handing a new loop an engine whose
+# asyncpg pool is bound to the dead loop ("Future attached to a different
+# loop"). Weak keys also drop entries for abandoned loops automatically.
+_engines: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, AsyncEngine]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def make_engine() -> AsyncEngine:
@@ -46,13 +53,14 @@ def get_engine() -> AsyncEngine:
     """
     try:
         loop = asyncio.get_running_loop()
-        key = id(loop)
     except RuntimeError:
-        key = 0
-    engine = _engines.get(key)
+        # No running loop: nothing safe to cache against — hand out a fresh
+        # engine owned by the caller.
+        return make_engine()
+    engine = _engines.get(loop)
     if engine is None:
         engine = make_engine()
-        _engines[key] = engine
+        _engines[loop] = engine
     return engine
 
 
