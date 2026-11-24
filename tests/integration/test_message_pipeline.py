@@ -38,8 +38,23 @@ def _sign_whatsapp_payload(payload: dict) -> tuple[bytes, str]:
 def clean_database():
     """Truncate all application tables before and after each integration test."""
     _truncate_tables()
+    _clear_event_streams()
     yield
     _truncate_tables()
+    _clear_event_streams()
+
+
+def _clear_event_streams() -> None:
+    """Reset Redis streams so stale PEL entries from earlier runs cannot be
+    claim-recovered into this test's processor (audit #8 recovery interaction).
+    """
+    import redis as sync_redis
+
+    client = sync_redis.from_url(str(get_settings().redis_url))
+    try:
+        client.delete("conversation.routed", "conversation.routed:dlq", "inbound.message")
+    finally:
+        client.close()
 
 
 def _truncate_tables() -> None:

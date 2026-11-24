@@ -5,7 +5,6 @@ Full RAG pipeline: PII detection → model routing → Vault retrieval → LLM i
 """
 
 
-import hashlib
 from dataclasses import dataclass
 
 import structlog
@@ -31,7 +30,7 @@ from desk.observability.tracing import start_span
 from desk.persona.integration import get_prompt_builder_with_persona
 from desk.policy.engine import PolicyEngine
 from desk.schemas.channels import OutboundMessage
-from desk.utils.encryption import FieldEncryption
+from desk.utils.encryption import field_encryption_from_settings
 
 logger = structlog.get_logger()
 
@@ -151,9 +150,9 @@ class AIEngine:
                         endpoint=cfg.local_model_endpoint,
                     )
                 if cfg.frontier_provider == "openai" and cfg.frontier_api_key_encrypted:
-                    key = FieldEncryption(
-                        hashlib.sha256(get_settings().secret_key.encode()).digest()
-                    ).decrypt(bytes(cfg.frontier_api_key_encrypted).decode("ascii"))
+                    key = field_encryption_from_settings().decrypt(
+                        bytes(cfg.frontier_api_key_encrypted).decode("ascii")
+                    )
                     self.frontier_provider = OpenAIProvider(
                         api_key=key,
                         model=cfg.frontier_model_name or "gpt-4o-mini",

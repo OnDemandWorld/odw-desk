@@ -98,7 +98,7 @@ class MessageProcessor:
                             )
                             self._claim_counts.pop(event_id, None)
                             continue
-                        await self._process_message(message)
+                        await self._process_message(message, from_claim=True)
                         self._claim_counts.pop(event_id, None)
 
                 messages = await self.event_bus.subscribe(
@@ -119,8 +119,16 @@ class MessageProcessor:
                 logger.error("Error in message processor loop", error=str(e))
                 await asyncio.sleep(1)
 
-    async def _process_message(self, message: dict[str, Any]) -> None:
-        """Process a single routed message."""
+    async def _process_message(
+        self, message: dict[str, Any], from_claim: bool = False
+    ) -> None:
+        """Process a single routed message.
+
+        ``from_claim`` marks events recovered from the PEL: they have already
+        been idle >= CLAIM_MIN_IDLE_MS, so a still-invisible conversation is
+        stale junk (rolled-back routing transaction) — dead-letter it instead
+        of leaving it pending to be re-claimed forever.
+        """
         event_id = message.get("event_id")
         payload = message.get("payload", {})
 
@@ -142,6 +150,24 @@ class MessageProcessor:
             # conversation is visible on this session's connection, otherwise
             # the reply is silently dropped and the event still acked.
             if not await self._wait_for_visible_conversation(conversation_id):
+                if from_claim:
+                    # Recovered entry still invisible after the idle window:
+                    # the routing transaction rolled back — dead-letter it.
+                    logger.warning(
+                        "Claimed event has no visible conversation — dead-lettering",
+                        conversation_id=conversation_id,
+                        event_id=event_id,
+                    )
+                    await self.event_bus.dead_letter(
+                        "conversation.routed",
+                        payload,
+                        "conversation_not_visible_after_claim",
+                    )
+                    if event_id:
+                        await self.event_bus.acknowledge(
+                            "conversation.routed", "ai-processors", event_id
+                        )
+                    return
                 # Audit #43: do not run inference or ack — leave the entry
                 # pending so claim-based recovery redelivers it after commit.
                 return

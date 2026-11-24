@@ -5,7 +5,6 @@ Admin setup wizard, configuration management, and compliance APIs.
 """
 
 import csv
-import hashlib
 import io
 from datetime import datetime
 from typing import Any
@@ -29,7 +28,7 @@ from desk.license.manager import FeatureGate
 from desk.models.ai_configuration import AIConfiguration
 from desk.models.audit_log import AuditLog
 from desk.security.rbac import require_role
-from desk.utils.encryption import FieldEncryption
+from desk.utils.encryption import field_encryption_from_settings
 
 logger = structlog.get_logger()
 
@@ -240,11 +239,9 @@ async def configure_ai_model(
         ai_config.frontier_provider = provider
         ai_config.frontier_model_name = model_name
         if api_key:
-            # Derive a 32-byte AES key from the app secret (same fallback as
-            # FieldEncryption.from_env, but sourced from settings so this works
-            # even when SECRET_KEY is not exported to the environment).
-            key = hashlib.sha256(get_settings().secret_key.encode()).digest()
-            encrypted = FieldEncryption(key).encrypt(api_key)
+            # Audit #47: single shared derivation (DESK_ENCRYPTION_KEY or
+            # SECRET_KEY) so every encrypt/decrypt path stays compatible.
+            encrypted = field_encryption_from_settings().encrypt(api_key)
             ai_config.frontier_api_key_encrypted = encrypted.encode("ascii")
     else:
         # Local model (ollama / vLLM / …): provider itself is not persisted;

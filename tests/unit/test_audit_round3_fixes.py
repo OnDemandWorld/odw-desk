@@ -255,8 +255,26 @@ class TestPendingEntryRecovery:
         monkeypatch.setattr(processor, "_process_message", process)
 
         await processor.run()
-        process.assert_awaited_once_with(claimed)
+        process.assert_awaited_once_with(claimed, from_claim=True)
         assert "2-0" not in processor._claim_counts
+
+    async def test_claimed_invisible_event_dead_lettered(self, monkeypatch) -> None:
+        """Recovered entries with no visible conversation are stale junk."""
+        from desk.workers.message_processor import MessageProcessor
+
+        processor = MessageProcessor(MagicMock(), MagicMock(), MagicMock())
+        monkeypatch.setattr(
+            processor, "_wait_for_visible_conversation", AsyncMock(return_value=False)
+        )
+        processor.event_bus.dead_letter = AsyncMock()
+        processor.event_bus.acknowledge = AsyncMock()
+
+        await processor._process_message(
+            {"event_id": "9-0", "payload": {"conversation_id": str(uuid4())}},
+            from_claim=True,
+        )
+        processor.event_bus.dead_letter.assert_awaited_once()
+        processor.event_bus.acknowledge.assert_awaited_once()
 
     async def test_poison_entry_dead_lettered_after_max_claims(self, monkeypatch) -> None:
         from desk.workers.message_processor import MessageProcessor

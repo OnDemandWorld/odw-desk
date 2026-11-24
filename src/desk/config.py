@@ -71,6 +71,23 @@ class Settings(BaseSettings):
     deployment_id: str = Field(
         default="dev-local-001", description="Unique deployment identifier"
     )
+    desk_encryption_key: str = Field(
+        default="",
+        description=(
+            "Optional dedicated key for field encryption (stored API keys). "
+            "When empty, SECRET_KEY is used. Set this to separate encryption "
+            "from JWT signing (audit #47). Changing it makes existing "
+            "ciphertexts undecryptable — re-save stored credentials after rotation."
+        ),
+    )
+    license_activation_secret: str = Field(
+        default="",
+        description=(
+            "HMAC secret used to verify signed license keys "
+            "(tier.expiry_iso.signature). When empty, license activation is "
+            "rejected (audit #48 — previously any literal string granted a tier)."
+        ),
+    )
     desk_api_key: str = Field(
         default="",
         description=(

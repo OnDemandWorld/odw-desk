@@ -10,6 +10,28 @@ import os
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
+def derive_field_key(secret: str) -> bytes:
+    """
+    Single field-encryption key derivation (audit #47).
+
+    Every encrypt/decrypt call site must use this so ciphertexts are portable
+    between helpers. SHA-256 is retained for compatibility with already-stored
+    ciphertexts; operators can set DESK_ENCRYPTION_KEY to separate the
+    encryption key from the JWT signing secret.
+    """
+    import hashlib
+
+    return hashlib.sha256(secret.encode()).digest()
+
+
+def field_encryption_from_settings() -> "FieldEncryption":
+    """FieldEncryption keyed by DESK_ENCRYPTION_KEY, falling back to SECRET_KEY."""
+    from desk.config import get_settings
+
+    settings = get_settings()
+    return FieldEncryption(derive_field_key(settings.desk_encryption_key or settings.secret_key))
+
+
 class FieldEncryption:
     """
     Field-level encryption using AES-256-GCM.
@@ -50,15 +72,10 @@ class FieldEncryption:
         if not key_hex:
             raise ValueError(f"Environment variable {env_var} not set")
 
-        # Try to decode as hex (64 hex chars = 32 bytes)
-        try:
-            key = bytes.fromhex(key_hex)
-        except ValueError:
-            # Fall back to using the raw string hashed to 32 bytes
-            import hashlib
-            key = hashlib.sha256(key_hex.encode()).digest()
-
-        return cls(key)
+        # Audit #47: use the SAME derivation as every other call site — the
+        # previous hex special-case produced ciphertexts that the admin/AI
+        # paths (always SHA-256) could not decrypt, and vice versa.
+        return cls(derive_field_key(key_hex))
 
     def encrypt(self, plaintext: str) -> str:
         """
