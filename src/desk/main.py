@@ -33,6 +33,7 @@ from desk.channels.webchat import WebChatAdapter
 from desk.channels.webchat import router as webchat_router
 from desk.channels.whatsapp_business import get_adapter as get_whatsapp_adapter
 from desk.channels.whatsapp_business import router as whatsapp_router
+from desk.compliance.engine import ComplianceEngine
 from desk.config import get_settings
 from desk.db import AsyncSessionLocal, get_engine
 from desk.events.redis_streams import RedisStreamsEventBus
@@ -62,6 +63,17 @@ def _ensure_loopback_bypasses_proxy() -> None:
 _ensure_loopback_bypasses_proxy()
 
 logger = structlog.get_logger()
+
+
+async def _retention_sweep() -> dict:
+    """Run one data-retention sweep in its own session (audit #12).
+
+    Previously enforce_retention_policy had no callers, so the configured
+    DATA_RETENTION_DAYS was never enforced (GDPR storage limitation).
+    """
+    async with AsyncSessionLocal() as session:
+        engine = ComplianceEngine(session)
+        return await engine.enforce_retention_policy()
 
 
 @asynccontextmanager
@@ -142,15 +154,31 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     sla_task = asyncio.create_task(sla_scanner_loop(), name="sla-scanner")
 
+    # Periodic data-retention enforcement (audit #12). Sleeps first so a
+    # restart does not immediately sweep; failures are logged, never fatal.
+    async def retention_scanner_loop() -> None:
+        while True:
+            await asyncio.sleep(settings.retention_scan_interval_seconds)
+            try:
+                summary = await _retention_sweep()
+                if summary.get("deleted_conversations"):
+                    logger.info("Retention sweep complete", **summary)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Retention sweep failed", error=str(exc))
+
+    retention_task = asyncio.create_task(retention_scanner_loop(), name="retention-scanner")
+
     logger.info("Redis, event bus, channel adapter manager, and message processor initialized")
 
     yield
 
     logger.info("Shutting down ODW.ai Desk")
-    # Cancel SLA scanner and message processor workers
-    for task in (sla_task, processor_task):
+    # Cancel SLA scanner, retention scanner and message processor workers
+    for task in (sla_task, retention_task, processor_task):
         task.cancel()
-    for task in (sla_task, processor_task):
+    for task in (sla_task, retention_task, processor_task):
         try:
             await task
         except asyncio.CancelledError:

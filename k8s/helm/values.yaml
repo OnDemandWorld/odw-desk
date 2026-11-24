@@ -1,5 +1,8 @@
 # Default values for odw-desk
-replicaCount: 2
+# Single replica: webchat/agent WebSocket registries and runtime-settings
+# overrides are process-local (audit #9). Scale out only after adding a
+# Redis pub/sub delivery relay and a shared override cache.
+replicaCount: 1
 
 image:
   repository: odwai/desk

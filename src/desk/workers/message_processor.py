@@ -6,6 +6,7 @@ persists the generated AI message, and dispatches outbound responses.
 """
 
 import asyncio
+import os
 from typing import Any
 
 import structlog
@@ -58,7 +59,9 @@ class MessageProcessor:
                 messages = await self.event_bus.subscribe(
                     "conversation.routed",
                     consumer_group="ai-processors",
-                    consumer_name="processor-1",
+                    # Unique per process so PEL ownership is attributable and
+                    # claim-based recovery (#8) can identify stranded entries.
+                    consumer_name=f"processor-{os.getpid()}",
                     count=10,
                     block_ms=5000,
                 )

@@ -205,6 +205,11 @@ class Settings(BaseSettings):
     data_retention_days: int = Field(
         default=365, ge=1, description="Conversation data retention period (days)"
     )
+    retention_scan_interval_seconds: int = Field(
+        default=86400,
+        ge=60,
+        description="Interval between automated retention sweeps (seconds, default daily)",
+    )
 
     # Compliance (V1.4)
     compliance_cross_product_erasure: bool = Field(

@@ -55,5 +55,9 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Expose port
 EXPOSE 8000
 
-# Run application
-CMD ["uvicorn", "desk.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+# Run application.
+# Single worker: webchat/agent WebSocket registries and runtime-settings
+# overrides are process-local, and each worker would start its own message
+# processor/SLA scanner. Scaling beyond 1 worker/replica requires a Redis
+# pub/sub delivery relay and a shared override cache first (audit #9).
+CMD ["uvicorn", "desk.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

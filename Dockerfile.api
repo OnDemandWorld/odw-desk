@@ -18,6 +18,10 @@ COPY src ./src
 COPY alembic ./alembic
 COPY alembic.ini .
 
+# Make the desk package importable (code lives in /app/src/desk; uvicorn only
+# adds the working directory to sys.path). Mirrors the production Dockerfile.
+ENV PYTHONPATH=/app/src
+
 # Run migrations on startup (production should use init containers)
 # For development, run uvicorn directly
 CMD ["uvicorn", "desk.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

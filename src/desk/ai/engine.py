@@ -134,30 +134,45 @@ class AIEngine:
             return
         cfg = snapshot["cfg"]
         if cfg is not None:
-            settings = get_settings()
-            if cfg.local_model_name or cfg.local_model_endpoint:
-                self.local_provider = OllamaProvider(
-                    endpoint=cfg.local_model_endpoint or settings.ollama_endpoint,
-                    model=cfg.local_model_name or settings.local_model_name,
+            # Guard the apply block: a decryption failure (e.g. SECRET_KEY
+            # rotated after a frontier key was saved) must not escape into
+            # process_detailed and dead-letter EVERY message permanently
+            # (audit #13). On failure keep serving with the local provider.
+            try:
+                settings = get_settings()
+                if cfg.local_model_name or cfg.local_model_endpoint:
+                    self.local_provider = OllamaProvider(
+                        endpoint=cfg.local_model_endpoint or settings.ollama_endpoint,
+                        model=cfg.local_model_name or settings.local_model_name,
+                    )
+                    logger.info(
+                        "Applied admin local-model config",
+                        model=cfg.local_model_name,
+                        endpoint=cfg.local_model_endpoint,
+                    )
+                if cfg.frontier_provider == "openai" and cfg.frontier_api_key_encrypted:
+                    key = FieldEncryption(
+                        hashlib.sha256(get_settings().secret_key.encode()).digest()
+                    ).decrypt(bytes(cfg.frontier_api_key_encrypted).decode("ascii"))
+                    self.frontier_provider = OpenAIProvider(
+                        api_key=key,
+                        model=cfg.frontier_model_name or "gpt-4o-mini",
+                    )
+                    logger.info("Applied admin frontier config", model=cfg.frontier_model_name)
+                if cfg.confidence_threshold:
+                    self.confidence_scorer = ConfidenceScorer(
+                        escalation_threshold=cfg.confidence_threshold,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "Runtime config apply failed — falling back to local provider",
+                    error=str(exc),
                 )
-                logger.info(
-                    "Applied admin local-model config",
-                    model=cfg.local_model_name,
-                    endpoint=cfg.local_model_endpoint,
-                )
-            if cfg.frontier_provider == "openai" and cfg.frontier_api_key_encrypted:
-                key = FieldEncryption(
-                    hashlib.sha256(get_settings().secret_key.encode()).digest()
-                ).decrypt(bytes(cfg.frontier_api_key_encrypted).decode("ascii"))
-                self.frontier_provider = OpenAIProvider(
-                    api_key=key,
-                    model=cfg.frontier_model_name or "gpt-4o-mini",
-                )
-                logger.info("Applied admin frontier config", model=cfg.frontier_model_name)
-            if cfg.confidence_threshold:
-                self.confidence_scorer = ConfidenceScorer(
-                    escalation_threshold=cfg.confidence_threshold,
-                )
+                # _select_provider falls back to local when frontier is None.
+                self.frontier_provider = None
+        # Advance the stamp even on failure: retrying the same broken config
+        # on every message adds latency and log spam without changing the
+        # outcome. A new admin save produces a new stamp and is re-applied.
         self._applied_cfg_stamp = stamp
 
     async def process(
