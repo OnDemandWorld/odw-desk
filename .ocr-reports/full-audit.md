@@ -23,7 +23,9 @@ Excluded per audit guardrails: documentation (`*.md`), `uv.lock`, `LICENSE`, `.g
 
 ## Fix progress (branch `fix/ocr-full-audit-round1`)
 
-**40 of 100 findings fixed** (14/14 High, 24/56 Medium, 2/30 Low) across 8 verified batches; 60 remain open (32 Medium, 28 Low). Every batch passed `ruff check src/desk/`, `mypy src/desk/ --ignore-missing-imports --python-version 3.14`, and `PYTHONPATH=src pytest tests/ -m "not e2e"` (285 baseline → 380 passed, 0 failures). Per-finding commands/results and caveats are recorded in `full-audit.json` (`status`, `verification_notes`). Checked items below are fixed; unchecked remain open. Scoped-mitigation caveats: #9 (scale-out relay still open), #11 (opt-in enforcement, partial surfaces), #3 (per-IP connect limiting open), #6 (delivery-status column open), #16 (shared-key mode), #44/#46 (GC disposal / pagination).
+**71 of 100 findings fixed** (14/14 High, 54/56 Medium, 3/30 Low) across 14 verified batches; **2 Medium skipped** with documented reasons (#67 Helm templates — feature build needing deployment design; #68 dependency lockfile — needs a dedicated resolution pass); **27 Low remain open** as backlog. Every batch passed `ruff check src/desk/`, `mypy src/desk/ --ignore-missing-imports --python-version 3.14`, and `PYTHONPATH=src pytest tests/ -m "not e2e"` (285 baseline → 430 passed, 0 failures; suite run repeatedly to confirm stability). Migration `d4e5f6a7b8c9` (unique customer identifiers) applied and verified against the local dev DB. Per-finding commands/results and caveats are in `full-audit.json` (`status`, `verification_notes`). Checked items below are fixed or dispositioned; unchecked remain open.
+
+Key caveats: #9 scale-out relay still open (single worker/replica enforced); #11 enforcement opt-in, partial surfaces; #3 per-IP connect limiting open; #6 delivery-status column open; #16 shared-key mode trusts supplied agent_id; #57 en/zh heuristic only; #63 Docker/CI verified by inspection; #66 chart inert until #67; #69 e2e needs live stack.
 
 ## Summary
 
@@ -83,18 +85,18 @@ Excluded per audit guardrails: documentation (`*.md`), `uv.lock`, `LICENSE`, `.g
 - [x] **#22** `email.py:347-381` — HMAC computed over extracted `raw` field, not received body → all signed JSON-envelope deliveries rejected 401.
 - [x] **#23** `email.py:210-222` — outbound stubs `success=True` in production while inbound flows → silent reply loss.
 - [x] **#24** `email.py:186-190` — SMTP without socket timeout → hung sends exhaust the shared `to_thread` executor.
-- [ ] **#25** `webchat.py:99-108` — failed send evicts a *replacement* socket (disconnect without identity) → online visitor silently drops replies.
+- [x] **#25** `webchat.py:99-108` — failed send evicts a *replacement* socket (disconnect without identity) → online visitor silently drops replies.
 - [x] **#26** `webchat.py:507-509` — raw exception text sent to anonymous visitors (schema/internal leak). *(2 reviewers)*
-- [ ] **#27** `channels/manager.py:78-98` — inbound polling `except Exception: pass`; one error kills the adapter silently forever.
+- [x] **#27** `channels/manager.py:78-98` — inbound polling `except Exception: pass`; one error kills the adapter silently forever.
 
 ### Data integrity (JSONB & state)
 - [x] **#28** `inbox_api.py:612-617` — AI feedback never persisted (in-place JSONB mutation, same-object reassignment).
 - [x] **#29** `conversations/manager.py:175-179` — status-change reason lost on non-empty metadata (same pattern; fix with #28). *(2 reviewers)*
 - [x] **#30** `persona/service.py:173-188` — activating an unknown persona deactivates ALL personas, returns success. *(2 reviewers)*
-- [ ] **#31** `persona/service.py:29-33` — `get_active_persona` unscoped/unordered; concurrent activations leave multiple active rows.
-- [ ] **#38** `csat_api.py:90-109` — CSAT one-rating rule race; full-dict metadata writes clobber concurrent writers.
-- [ ] **#39** `compliance/engine.py:68-73` — audit hash chain forks under concurrent writers → tamper-evidence breaks at high volume. *(2 reviewers)*
-- [ ] **#41** `customer_resolver.py:49-76` — no unique constraint on channel identifiers → duplicate customers; dead retry path; incomplete GDPR erasure. *(2 reviewers)*
+- [x] **#31** `persona/service.py:29-33` — `get_active_persona` unscoped/unordered; concurrent activations leave multiple active rows.
+- [x] **#38** `csat_api.py:90-109` — CSAT one-rating rule race; full-dict metadata writes clobber concurrent writers.
+- [x] **#39** `compliance/engine.py:68-73` — audit hash chain forks under concurrent writers → tamper-evidence breaks at high volume. *(2 reviewers)*
+- [x] **#41** `customer_resolver.py:49-76` — no unique constraint on channel identifiers → duplicate customers; dead retry path; incomplete GDPR erasure. *(2 reviewers)*
 
 ### Policy engine
 - [x] **#32** `policy/engine.py:243-247` — unvalidated `trigger_config`: one bad regex/shape outages the whole AI pipeline; ReDoS on the single worker. *(2 reviewers)*
@@ -104,9 +106,9 @@ Excluded per audit guardrails: documentation (`*.md`), `uv.lock`, `LICENSE`, `.g
 ### Configuration plumbing
 - [x] **#35** `runtime_settings.py:77-87` — `load_all()` has zero callers; persisted overrides lost on every restart; the persistence test only checks the in-process cache. *(merges infra High test finding)*
 - [x] **#36** `admin/api.py:128-152` — `/setup/whatsapp` persists config no component reads; wizard is a silent no-op.
-- [ ] **#37** `websocket.py:111-140` — agent WS rejects JWTs the REST API accepts → no realtime updates in production JWT mode.
-- [ ] **#61** `model_router.py:237-252` — router frozen from env; admin-configured frontier never routed to.
-- [ ] **#62** `pii_shield.py:271-281` — `frontier_allowed_with_redaction` toggle persisted but never consumed.
+- [x] **#37** `websocket.py:111-140` — agent WS rejects JWTs the REST API accepts → no realtime updates in production JWT mode.
+- [x] **#61** `model_router.py:237-252` — router frozen from env; admin-configured frontier never routed to.
+- [x] **#62** `pii_shield.py:271-281` — `frontier_allowed_with_redaction` toggle persisted but never consumed.
 
 ### Worker & event pipeline
 - [x] **#42** `message_processor.py:164-177` — event acked even when DLQ write fails → failed events vanish.
@@ -116,35 +118,35 @@ Excluded per audit guardrails: documentation (`*.md`), `uv.lock`, `LICENSE`, `.g
 - [x] **#46** `main.py:129-143` — SLA scanner in every worker: racing duplicate escalations + unbounded eager load of all message history. *(2 reviewers)*
 
 ### AI quality & sovereignty
-- [ ] **#53** `engine.py:322-334` — Vault skipped for `LOCAL_MODEL_ONLY` → PII-bearing messages capped at 0.56 confidence, always escalated (deflection defeated for the core market).
-- [ ] **#54** `confidence_scorer.py:140-159` — purely relative knowledge scoring: one irrelevant chunk = 1.0 > Vault outage 0.3 → confident hallucinations auto-sent.
-- [ ] **#55** `confidence_scorer.py:214-229` — whitespace word count mis-scores every Chinese reply as too short.
-- [ ] **#56** `pii_shield.py:23-30` — CN phone regex misses `+86` and separated formats → raw numbers to frontier.
-- [ ] **#57** `pii_shield.py:179-187` — English-only NER + 3 CN regexes; Chinese names/addresses undetected in mixed text.
-- [ ] **#58** `prompt_builder.py:69-91` — raw forgeable `Customer:`/`Agent:` transcript → prompt injection via message or history.
-- [ ] **#59** `engine.py:363-370` — `fallback_chain` never executed; provider failure → canned reply acked as success, no escalation.
-- [ ] **#60** `vault_client.py:143-148` — Redis cache failure aborts retrieval or discards fetched documents.
-- [ ] **#63** `pii_shield.py:129` — spaCy model downloaded at runtime; air-gapped deployments crash-loop the worker. *(2 reviewers)*
+- [x] **#53** `engine.py:322-334` — Vault skipped for `LOCAL_MODEL_ONLY` → PII-bearing messages capped at 0.56 confidence, always escalated (deflection defeated for the core market).
+- [x] **#54** `confidence_scorer.py:140-159` — purely relative knowledge scoring: one irrelevant chunk = 1.0 > Vault outage 0.3 → confident hallucinations auto-sent.
+- [x] **#55** `confidence_scorer.py:214-229` — whitespace word count mis-scores every Chinese reply as too short.
+- [x] **#56** `pii_shield.py:23-30` — CN phone regex misses `+86` and separated formats → raw numbers to frontier.
+- [x] **#57** `pii_shield.py:179-187` — English-only NER + 3 CN regexes; Chinese names/addresses undetected in mixed text.
+- [x] **#58** `prompt_builder.py:69-91` — raw forgeable `Customer:`/`Agent:` transcript → prompt injection via message or history.
+- [x] **#59** `engine.py:363-370` — `fallback_chain` never executed; provider failure → canned reply acked as success, no escalation.
+- [x] **#60** `vault_client.py:143-148` — Redis cache failure aborts retrieval or discards fetched documents.
+- [x] **#63** `pii_shield.py:129` — spaCy model downloaded at runtime; air-gapped deployments crash-loop the worker. *(2 reviewers)*
 
 ### Crypto, license, compliance
-- [ ] **#47** `utils/encryption.py:53-59` — unsalted SHA-256 KDF; encryption key = JWT signing secret; two incompatible derivation paths.
-- [ ] **#48** `license/manager.py:215-254` — `activate_license('enterprise')` grants enterprise for the literal string.
-- [ ] **#49** `license/manager.py:150-180` — NULL `valid_until` fails open; gates never re-check expiry.
-- [ ] **#50** `compliance/engine.py:214-227` — retention keeps customer PII (phone/name) forever even after conversations delete.
+- [x] **#47** `utils/encryption.py:53-59` — unsalted SHA-256 KDF; encryption key = JWT signing secret; two incompatible derivation paths.
+- [x] **#48** `license/manager.py:215-254` — `activate_license('enterprise')` grants enterprise for the literal string.
+- [x] **#49** `license/manager.py:150-180` — NULL `valid_until` fails open; gates never re-check expiry.
+- [x] **#50** `compliance/engine.py:214-227` — retention keeps customer PII (phone/name) forever even after conversations delete.
 
 ### Observability
-- [ ] **#51** `tracing.py:297-305` — synchronous `httpx.post` on the event loop per span end (up to 2s stalls).
-- [ ] **#52** `tracing.py:44-46` — 32-hex span IDs (spec: 16) → collectors reject every OTLP span silently.
-- [ ] **#40** `reports_api.py:153-169` — overview CSAT aggregate scans the entire conversations table regardless of window.
+- [x] **#51** `tracing.py:297-305` — synchronous `httpx.post` on the event loop per span end (up to 2s stalls).
+- [x] **#52** `tracing.py:44-46` — 32-hex span IDs (spec: 16) → collectors reject every OTLP span silently.
+- [x] **#40** `reports_api.py:153-169` — overview CSAT aggregate scans the entire conversations table regardless of window.
 
 ### Infrastructure & tests
-- [ ] **#64** `Dockerfile.api:1-23` — runs as root; `--reload` baked into CMD.
-- [ ] **#65** `docker-compose.dev.yml:14-46` — Postgres/Redis/MinIO published on 0.0.0.0 with weak/no credentials.
-- [ ] **#66** `k8s/helm/values.yaml:56-97` — placeholder secret key (forgeable JWTs if padded), desk/desk DB, no Redis auth, no API key.
-- [ ] **#67** `k8s/helm/Chart.yaml:1-18` — chart has no templates/dependencies: `helm install` deploys nothing.
-- [ ] **#68** `requirements.txt:1-58` — floor-only pins duplicated in two files; builds resolve fresh every time.
-- [ ] **#69** `tests/e2e/test_message_flow.py:97-118` — flagship E2E signs the wrong bytes and asserts no pipeline outcome.
-- [ ] **#70** `tests/unit/test_review_round4_fixes.py:423-436` — takeover guards "tested" by grepping source strings; zero behavioral coverage.
+- [x] **#64** `Dockerfile.api:1-23` — runs as root; `--reload` baked into CMD.
+- [x] **#65** `docker-compose.dev.yml:14-46` — Postgres/Redis/MinIO published on 0.0.0.0 with weak/no credentials.
+- [x] **#66** `k8s/helm/values.yaml:56-97` — placeholder secret key (forgeable JWTs if padded), desk/desk DB, no Redis auth, no API key.
+- [x] **#67** `k8s/helm/Chart.yaml:1-18` — chart has no templates/dependencies: `helm install` deploys nothing.
+- [x] **#68** `requirements.txt:1-58` — floor-only pins duplicated in two files; builds resolve fresh every time.
+- [x] **#69** `tests/e2e/test_message_flow.py:97-118` — flagship E2E signs the wrong bytes and asserts no pipeline outcome.
+- [x] **#70** `tests/unit/test_review_round4_fixes.py:423-436` — takeover guards "tested" by grepping source strings; zero behavioral coverage.
 
 ## LOW — backlog (30)
 
@@ -173,7 +175,7 @@ Excluded per audit guardrails: documentation (`*.md`), `uv.lock`, `LICENSE`, `.g
 - [ ] **#93** `prompt_builder.py:129-149` — no history character budget → long conversations overflow local context.
 - [ ] **#94** `requirements.txt:50-58` — dev tooling shipped in production images.
 - [ ] **#95** `alembic.ini:6` — default migration URL port 5433 matches nothing.
-- [ ] **#96** `docker-compose.dev.yml:35` — MinIO `latest` unpinned.
+- [x] **#96** `docker-compose.dev.yml:35` — MinIO `latest` unpinned.
 - [ ] **#97** `k8s/helm/values.yaml:4-7` — app image `latest` + IfNotPresent → stale replicas.
 - [ ] **#98** `alembic/env.py:17-34` — `SystemSetting` missing from target metadata → autogenerate would DROP `system_settings` (data-loss potential; review autogenerated migrations).
 - [ ] **#99** `tests/unit/test_review_round6_fixes.py:287-301` — no-op self-patch + duplicated disjunct in SLA test.
