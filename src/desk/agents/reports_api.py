@@ -151,11 +151,17 @@ async def reports_overview(
     )
 
     # 7. CSAT (submitted via /api/v1/public/csat, stored in metadata) in window.
+    # Audit #40: filter in SQL — the previous full-table scan transferred and
+    # parsed every CSAT payload regardless of the requested window. ISO-8601
+    # UTC strings compare lexicographically; the Python re-check below stays
+    # as a safety net for malformed timestamps.
     csat_rows = (
         await db.execute(
             select(
                 Conversation.metadata_["csat"]["score"].astext,
                 Conversation.metadata_["csat"]["rated_at"].astext,
+            ).where(
+                Conversation.metadata_["csat"]["rated_at"].astext >= since.isoformat()
             )
         )
     ).all()

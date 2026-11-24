@@ -20,6 +20,12 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+# Audit #63: bake the spaCy NER model into the image — Presidio otherwise
+# downloads ~560MB at first use, which fails outright in air-gapped
+# deployments (the sovereignty-focused target market) and crash-loops the
+# AI worker.
+RUN python -m spacy download en_core_web_lg
+
 # Stage 2: Production
 FROM python:3.14-slim as production
 

@@ -13,6 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Audit #63: bake the spaCy NER model (no runtime download / air-gap failure).
+RUN python -m spacy download en_core_web_lg
+
 # Copy application code
 COPY src ./src
 COPY alembic ./alembic
