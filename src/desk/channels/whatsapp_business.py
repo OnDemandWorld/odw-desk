@@ -330,14 +330,17 @@ class WhatsAppBusinessAdapter(ChannelAdapter):
         """
         app_secret = self.settings.whatsapp_app_secret
         if not app_secret:
-            if self.settings.environment == "production":
-                # Fail closed: an unauthenticated webhook accepts forged
-                # customer messages and can drive real WhatsApp credentials to
-                # arbitrary numbers. Development (no secret configured) keeps
-                # the historical warn-and-accept behaviour.
+            # Audit #20: fail closed whenever verification is impossible in a
+            # deployment that can actually SEND (outbound credentials present),
+            # not only when environment == production — the env default is
+            # 'development', so live-credential deployments previously accepted
+            # forged webhooks and drove real sends to attacker-chosen numbers.
+            wa_cfg = _effective_whatsapp_config()
+            has_outbound_credentials = bool(wa_cfg["access_token"] or wa_cfg["phone_number_id"])
+            if self.settings.environment == "production" or has_outbound_credentials:
                 logger.error(
-                    "whatsapp_app_secret not configured in production; "
-                    "rejecting webhook (set WHATSAPP_APP_SECRET)"
+                    "whatsapp_app_secret not configured; rejecting webhook "
+                    "(set WHATSAPP_APP_SECRET — outbound credentials are live)"
                 )
                 return False
             logger.warning(
