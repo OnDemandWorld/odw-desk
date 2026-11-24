@@ -23,6 +23,8 @@ from desk.admin.runtime_settings import persist as persist_runtime_setting
 from desk.compliance.service import VALID_DELETE_MODES, ComplianceService
 from desk.config import get_settings
 from desk.dependencies import get_db
+from desk.license.gates import require_feature
+from desk.license.manager import FeatureGate
 from desk.models.ai_configuration import AIConfiguration
 from desk.models.audit_log import AuditLog
 from desk.security.rbac import require_role
@@ -351,7 +353,10 @@ async def update_pii_configuration(
 # ============================================================================
 
 
-@router.get("/compliance/audit-logs")
+@router.get(
+    "/compliance/audit-logs",
+    dependencies=[Depends(require_feature(FeatureGate.COMPLIANCE_TOOLS))],
+)
 async def get_audit_logs(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
@@ -474,7 +479,13 @@ def _parse_report_timestamp(value: str, field: str) -> datetime:
         ) from exc
 
 
-@router.get("/compliance/report", dependencies=[Depends(require_role("admin"))])
+@router.get(
+    "/compliance/report",
+    dependencies=[
+        Depends(require_role("admin")),
+        Depends(require_feature(FeatureGate.COMPLIANCE_TOOLS)),
+    ],
+)
 async def get_compliance_report(
     format: str = Query("json", description="Output format: json (default) or csv"),
     start: str = Query(None, description="Inclusive start timestamp (ISO-8601)"),
@@ -527,7 +538,10 @@ async def get_compliance_report(
     }
 
 
-@router.post("/compliance/export")
+@router.post(
+    "/compliance/export",
+    dependencies=[Depends(require_feature(FeatureGate.COMPLIANCE_TOOLS))],
+)
 async def export_customer_data(
     customer_id: UUID = Query(..., description="Customer ID to export"),
     actor_id: str = Query("system", description="Actor requesting the export (for audit)"),
@@ -548,7 +562,10 @@ async def export_customer_data(
     return {"success": True, "format": "json", "export": export}
 
 
-@router.post("/compliance/delete")
+@router.post(
+    "/compliance/delete",
+    dependencies=[Depends(require_feature(FeatureGate.COMPLIANCE_TOOLS))],
+)
 async def delete_customer_data(
     customer_id: UUID = Query(..., description="Customer ID to delete"),
     reason: str = Query(..., description="Deletion reason"),
@@ -580,7 +597,10 @@ async def delete_customer_data(
     return {"success": True, **summary}
 
 
-@router.get("/compliance/reports")
+@router.get(
+    "/compliance/reports",
+    dependencies=[Depends(require_feature(FeatureGate.COMPLIANCE_TOOLS))],
+)
 async def get_compliance_reports() -> dict[str, Any]:
     """Get available compliance reports."""
     return {

@@ -37,6 +37,8 @@ from desk.compliance.engine import ComplianceEngine
 from desk.config import get_settings
 from desk.db import AsyncSessionLocal, get_engine
 from desk.events.redis_streams import RedisStreamsEventBus
+from desk.license.gates import require_feature
+from desk.license.manager import FeatureGate
 from desk.observability.tracing import TraceIdMiddleware
 from desk.security.rbac import require_role
 from desk.sla.checker import scan_due_conversations
@@ -95,6 +97,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     event_bus = RedisStreamsEventBus(redis_manager)
     await event_bus.connect()
     app.state.event_bus = event_bus
+
+    # Initialize license state (audit #11) so feature gates and expiry checks
+    # have a row to read; enforcement itself is opt-in via
+    # LICENSE_ENFORCEMENT_ENABLED (see desk.license.gates.require_feature).
+    try:
+        from desk.license.manager import LicenseManager
+
+        async with AsyncSessionLocal() as license_db:
+            await LicenseManager(license_db).initialize()
+    except Exception as exc:  # noqa: BLE001 - never block startup on licensing
+        logger.warning("License initialization failed (gates fail open)", error=str(exc))
 
     # Initialize channel adapter manager (INFRA-006)
     channel_manager = ChannelAdapterManager(event_bus, redis_manager)
@@ -243,7 +256,13 @@ def create_app() -> FastAPI:
     # persona/policy management lives under /api/v1/admin/ and is admin-only;
     # it was previously registered with api_guard (auth only), letting agents
     # access it (found via role-based UAT). Guard it as admin.
-    app.include_router(persona_policy_router, dependencies=admin_guard)
+    # Persona/policy management is a paid surface (audit #11): gate it when
+    # license enforcement is enabled (no-op otherwise).
+    app.include_router(
+        persona_policy_router,
+        dependencies=admin_guard
+        + [Depends(require_feature(FeatureGate.CUSTOM_PERSONA))],
+    )
 
     @app.get("/health", tags=["Health"])
     async def health_check() -> dict:

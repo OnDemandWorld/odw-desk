@@ -334,6 +334,22 @@ class AIEngine:
                     model=routing_decision.model_name,
                 )
 
+                # Audit #4: history must obey the same PII gate as the current
+                # message. Raw prior customer turns were previously sent
+                # verbatim to frontier models even when the shield redacted
+                # the current turn — defeating the sovereignty guarantee.
+                history_for_prompt = conversation_history
+                if routing_decision.target == ModelTarget.FRONTIER and conversation_history:
+                    history_for_prompt = []
+                    for entry in conversation_history:
+                        if entry.get("role") == "customer" and entry.get("content"):
+                            hist_pii = await self.pii_shield.analyze(entry["content"])
+                            history_for_prompt.append(
+                                {**entry, "content": hist_pii.redacted_text}
+                            )
+                        else:
+                            history_for_prompt.append(entry)
+
                 # Step 3: Vault Retrieval (knowledge base)
                 knowledge_docs: list[RetrievedDocument] = []
                 try:
@@ -353,7 +369,7 @@ class AIEngine:
                     persona_prompt_builder = await get_prompt_builder_with_persona(db)
                     system_prompt, prompt = await persona_prompt_builder.build_prompt_with_persona(
                         user_message=pii_result.redacted_text if pii_result.pii_detected else content,
-                        conversation_history=conversation_history,
+                        conversation_history=history_for_prompt,
                         knowledge_context=[doc.to_dict() for doc in knowledge_docs],
                     )
 

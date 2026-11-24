@@ -13,7 +13,11 @@ identifier used as both the sender identifier and the channel conversation id,
 so a returning visitor reuses the same conversation.
 """
 
+import hashlib
+import hmac
 import json
+import secrets
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -26,6 +30,7 @@ from sqlalchemy import select
 from desk.channels.base import AdapterConfig, AdapterHealthStatus, ChannelAdapter
 from desk.channels.rate_limit import get_webchat_rate_limiter
 from desk.compliance.engine import ComplianceEngine
+from desk.config import get_settings
 from desk.db import AsyncSessionLocal
 from desk.dependencies import get_event_bus
 from desk.models.message import Message
@@ -44,6 +49,51 @@ MEDIA_FRAME_TYPES = ("image", "file")
 
 # Inbound frame type carrying a read receipt (V1.6 F-4, DC1).
 READ_FRAME_TYPE = "read"
+
+# Audit #3: the visitor socket used to be unauthenticated — a client-chosen,
+# Math.random-based visitor id was the only credential, and connecting with a
+# known id displaced the victim's live socket and received their replies.
+# Sessions are now issued server-side: a crypto-random visitor id plus a
+# short-lived HMAC token bound to that id, required on the WS handshake.
+SESSION_TTL_SECONDS = 3600
+
+
+def _sign_visitor_token(visitor_id: str, expires: int) -> str:
+    """HMAC-SHA256 token binding visitor_id to an expiry (stateless verify)."""
+    sig = hmac.new(
+        get_settings().secret_key.encode(),
+        f"{visitor_id}.{expires}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{expires}.{sig}"
+
+
+def _verify_visitor_token(visitor_id: str, token: str | None) -> bool:
+    """Constant-time verification of the session token for this visitor id."""
+    if not token:
+        return False
+    expires_str, _, sig = token.partition(".")
+    if not sig:
+        return False
+    try:
+        expires = int(expires_str)
+    except ValueError:
+        return False
+    if expires < time.time():
+        return False
+    return hmac.compare_digest(_sign_visitor_token(visitor_id, expires), token)
+
+
+@router.post("/api/v1/webchat/session")
+async def create_webchat_session() -> dict[str, Any]:
+    """Issue a server-generated visitor id and a signed short-lived WS token."""
+    visitor_id = f"widget-{secrets.token_urlsafe(12)}"
+    expires = int(time.time()) + SESSION_TTL_SECONDS
+    return {
+        "visitor_id": visitor_id,
+        "token": _sign_visitor_token(visitor_id, expires),
+        "expires_at": expires,
+    }
 
 
 class WebChatManager:
@@ -420,9 +470,14 @@ async def push_media(
 
 
 @router.websocket("/ws/chat/{visitor_id}")
-async def webchat_endpoint(websocket: WebSocket, visitor_id: str) -> None:
+async def webchat_endpoint(
+    websocket: WebSocket, visitor_id: str, token: str | None = None
+) -> None:
     """
     WebSocket endpoint for browser-based chat.
+
+    Requires a session token from ``POST /api/v1/webchat/session`` bound to
+    ``visitor_id`` (audit #3); unauthenticated handshakes are closed with 4401.
 
     Inbound frames are rate-limited per visitor (V1.4 F-4); over-limit frames are
     rejected and the socket closed with a best-effort audit record. Plain-text
@@ -431,6 +486,9 @@ async def webchat_endpoint(websocket: WebSocket, visitor_id: str) -> None:
     envelope carrying the resolved conversation id. Outbound AI/agent replies are
     pushed via ``push_reply`` / ``push_media``.
     """
+    if not _verify_visitor_token(visitor_id, token):
+        await websocket.close(code=4401)
+        return
     await manager.connect(visitor_id, websocket)
     await websocket.send_json({"type": "connected", "visitor_id": visitor_id})
 

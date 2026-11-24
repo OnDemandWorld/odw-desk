@@ -22,6 +22,15 @@ from desk.router.message_router import MessageRouter
 from desk.schemas.channels import InboundMessage
 
 
+def _ws_url(visitor_id: str) -> str:
+    """Signed WS URL for tests (audit #3 requires a session token)."""
+    import time as _time
+
+    from desk.channels.webchat import _sign_visitor_token
+
+    return f"/ws/chat/{visitor_id}?token={_sign_visitor_token(visitor_id, int(_time.time()) + 3600)}"
+
+
 class TestParseReadFrame:
     def test_read_frame_parsed(self):
         raw = json.dumps({"type": "read", "message_id": "m1"})
@@ -96,7 +105,7 @@ class TestWebsocketReadReceipt:
 
         with patch("desk.channels.webchat.AsyncSessionLocal", return_value=cm):
             client = TestClient(app)
-            with client.websocket_connect("/ws/chat/visitor-read") as websocket:
+            with client.websocket_connect(_ws_url("visitor-read")) as websocket:
                 connected = websocket.receive_json()
                 assert connected["type"] == "connected"
 
@@ -123,7 +132,7 @@ class TestWebsocketReadReceipt:
 
         with patch("desk.channels.webchat.AsyncSessionLocal", return_value=cm):
             client = TestClient(app)
-            with client.websocket_connect("/ws/chat/visitor-read-nf") as websocket:
+            with client.websocket_connect(_ws_url("visitor-read-nf")) as websocket:
                 websocket.receive_json()  # connected
                 websocket.send_text(json.dumps({"type": "read", "message_id": "ghost"}))
                 ack = websocket.receive_json()

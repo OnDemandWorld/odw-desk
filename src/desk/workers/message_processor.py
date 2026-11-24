@@ -7,6 +7,7 @@ persists the generated AI message, and dispatches outbound responses.
 
 import asyncio
 import os
+import time
 from typing import Any
 
 import structlog
@@ -40,6 +41,13 @@ class MessageProcessor:
     4. Acknowledges the event on success
     """
 
+    # Recovery tuning (audit #8): claim entries idle longer than this, at
+    # most every CLAIM_INTERVAL_SECONDS; after MAX_CLAIM_ATTEMPTS claims an
+    # entry is treated as poison and dead-lettered.
+    CLAIM_MIN_IDLE_MS = 60_000
+    CLAIM_INTERVAL_SECONDS = 30.0
+    MAX_CLAIM_ATTEMPTS = 3
+
     def __init__(
         self,
         event_bus: RedisStreamsEventBus,
@@ -49,19 +57,54 @@ class MessageProcessor:
         self.event_bus = event_bus
         self.outbound_dispatcher = outbound_dispatcher
         self.ai_engine = ai_engine
+        self._claim_counts: dict[str, int] = {}
 
     async def run(self) -> None:
         """Run the message processor loop."""
         logger.info("Starting message processor worker")
+        # Unique per process so PEL ownership is attributable and claim-based
+        # recovery can identify stranded entries (audit #9).
+        consumer_name = f"processor-{os.getpid()}"
+        last_claim = 0.0
 
         while True:
             try:
+                # Audit #8: recover entries delivered to a consumer that died
+                # before acking. subscribe('>') alone never returns them.
+                now = time.monotonic()
+                if now - last_claim >= self.CLAIM_INTERVAL_SECONDS:
+                    last_claim = now
+                    claimed = await self.event_bus.claim_pending(
+                        "conversation.routed",
+                        consumer_group="ai-processors",
+                        consumer_name=consumer_name,
+                        min_idle_ms=self.CLAIM_MIN_IDLE_MS,
+                    )
+                    for message in claimed:
+                        event_id = str(message.get("event_id", ""))
+                        self._claim_counts[event_id] = self._claim_counts.get(event_id, 0) + 1
+                        if self._claim_counts[event_id] > self.MAX_CLAIM_ATTEMPTS:
+                            logger.error(
+                                "Claimed event exceeded max attempts — dead-lettering",
+                                event_id=event_id,
+                            )
+                            await self.event_bus.dead_letter(
+                                "conversation.routed",
+                                message.get("payload", {}),
+                                "max_claim_attempts_exceeded",
+                            )
+                            await self.event_bus.acknowledge(
+                                "conversation.routed", "ai-processors", event_id
+                            )
+                            self._claim_counts.pop(event_id, None)
+                            continue
+                        await self._process_message(message)
+                        self._claim_counts.pop(event_id, None)
+
                 messages = await self.event_bus.subscribe(
                     "conversation.routed",
                     consumer_group="ai-processors",
-                    # Unique per process so PEL ownership is attributable and
-                    # claim-based recovery (#8) can identify stranded entries.
-                    consumer_name=f"processor-{os.getpid()}",
+                    consumer_name=consumer_name,
                     count=10,
                     block_ms=5000,
                 )
@@ -144,7 +187,14 @@ class MessageProcessor:
             )
 
             if outbound is not None:
-                await self.outbound_dispatcher.dispatch(outbound)
+                delivery = await self.outbound_dispatcher.dispatch(outbound)
+                if not delivery.get("success"):
+                    # Audit #6: a failed delivery must not be acked as success.
+                    # Raising routes the event to the dead-letter stream via
+                    # the failure path below instead of silently losing it.
+                    raise RuntimeError(
+                        f"Outbound delivery failed: {delivery.get('error', 'unknown error')}"
+                    )
 
             # Acknowledge event
             if event_id:

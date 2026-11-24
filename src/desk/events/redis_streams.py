@@ -135,6 +135,64 @@ class RedisStreamsEventBus(EventBus):
         async with self.redis_manager.get_client() as client:
             await client.xack(stream, consumer_group, message_id)
 
+    async def claim_pending(
+        self,
+        stream: str,
+        consumer_group: str,
+        consumer_name: str,
+        min_idle_ms: int = 60_000,
+        count: int = 10,
+    ) -> list[dict[str, Any]]:
+        """
+        Claim idle pending entries for redelivery (XAUTOCLAIM, audit #8).
+
+        subscribe() only reads new entries ('>'), so entries delivered to a
+        consumer that crashed before acking were stranded in the PEL forever.
+        Call this periodically to recover them; entries returned here have
+        been idle for at least ``min_idle_ms``.
+
+        Returns:
+            List of events with `event_id` and `payload` fields (same shape
+            as subscribe()).
+        """
+        async with self.redis_manager.get_client() as client:
+            try:
+                await client.xgroup_create(stream, consumer_group, id="0", mkstream=True)
+            except Exception as e:
+                if "already exists" not in str(e):
+                    raise
+            result = await client.xautoclaim(
+                stream,
+                consumer_group,
+                consumer_name,
+                min_idle_time=min_idle_ms,
+                start_id="0-0",
+                count=count,
+            )
+        # redis-py returns (next_start_id, claimed_entries, deleted_ids).
+        entries = result[1] if isinstance(result, (list, tuple)) and len(result) >= 2 else []
+        events: list[dict[str, Any]] = []
+        for entry in entries or []:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                continue
+            message_id, fields = entry
+            if not isinstance(fields, dict):
+                continue
+            payload_str = fields.get("payload", "{}")
+            try:
+                payload = json.loads(payload_str)
+            except json.JSONDecodeError:
+                payload = {"raw_payload": payload_str}
+            events.append(
+                {
+                    "event_id": str(message_id),
+                    "stream": stream,
+                    "consumer_group": consumer_group,
+                    "payload": payload,
+                }
+            )
+        return events
+
     async def dead_letter(self, stream: str, event: dict[str, Any], reason: str) -> None:
         """
         Move a failed event to the dead-letter stream.

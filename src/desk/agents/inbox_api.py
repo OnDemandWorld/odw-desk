@@ -11,6 +11,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import String, cast, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -307,14 +308,14 @@ async def take_over_conversation(
     }
 
 
-@router.post("/conversations/{conversation_id}/respond")
+@router.post("/conversations/{conversation_id}/respond", response_model=None)
 async def send_agent_response(
     conversation_id: UUID,
     request: Request,
     agent_id: UUID = Query(..., description="Agent ID sending response"),
     content: str = Query(None, description="Response content (legacy; prefer JSON body)"),
     db: AsyncSession = Depends(get_db),
-) -> dict:
+) -> dict | JSONResponse:
     """
     Send a response as a human agent.
 
@@ -407,6 +408,24 @@ async def send_agent_response(
                 channel=conversation.channel,
                 delivery=delivery,
             )
+            if not delivery.get("success"):
+                # Audit #6: surface delivery failure to the agent instead of
+                # reporting success while the customer never receives the reply.
+                logger.error(
+                    "Agent reply delivery failed",
+                    conversation_id=str(conversation_id),
+                    channel=conversation.channel,
+                    error=delivery.get("error"),
+                )
+                return JSONResponse(
+                    status_code=502,
+                    content={
+                        "success": False,
+                        "error": delivery.get("error", "channel delivery failed"),
+                        "message_id": str(message.id),
+                        "conversation_id": str(conversation_id),
+                    },
+                )
         else:
             logger.warning(
                 "Agent reply not dispatched: no recipient identifier for channel",

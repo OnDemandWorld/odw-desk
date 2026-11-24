@@ -267,6 +267,14 @@ class Settings(BaseSettings):
 
     # License
     license_key: str = Field(default="free", description="Desk license key")
+    license_enforcement_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enforce license feature gates on paid surfaces (persona/policy "
+            "management, compliance tools). Default off for dev/test; enable "
+            "in deployments that monetize paid tiers (audit #11)."
+        ),
+    )
     license_grace_period_days: int = Field(
         default=7, ge=0, description="License grace period (days)"
     )
