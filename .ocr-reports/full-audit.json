@@ -9,7 +9,9 @@
     "title": "Admin/agent APIs unauthenticated by default (DESK_API_KEY empty), even in production",
     "root_cause": "require_role() returns None (no-op) whenever settings.desk_api_key is empty; config.py:74-80 defaults it to \"\" and no production validator requires it (only secret_key is checked). DESK_API_KEY is absent from .env.example, docker-compose.dev.yml and k8s/helm/values.yaml, so the documented deployment path leaves every /api/v1/admin/* and /api/v1/agents/* route open. Impact chain: unauthenticated callers can PUT /config/pii to disable the PII shield (pii_shield.py:153-161 then returns NO_RESTRICTION with raw text), POST /setup/ai-model or /setup/vault to point providers at attacker-controlled endpoints (applied without validation at engine.py:138-147 and vault_client.py:303-309), run GDPR hard-delete, and exfiltrate all customer data via compliance export.",
     "failure_scenario": "Default deployment (no DESK_API_KEY), API reachable on 0.0.0.0:8000. Any network client calls admin endpoints with no credentials: disable PII gating, redirect model/Vault traffic to an attacker server, or irreversibly delete customer data.",
-    "suggested_fix": "Fail closed: refuse startup (or deny the admin/agent routers) when desk_api_key is unset and environment != development; add DESK_API_KEY to .env.example and Helm values with guidance. Validate/allow-list admin-supplied model and Vault endpoints (scheme/host) before instantiating providers. Confirmed by three independent reviewers."
+    "suggested_fix": "Fail closed: refuse startup (or deny the admin/agent routers) when desk_api_key is unset and environment != development; add DESK_API_KEY to .env.example and Helm values with guidance. Validate/allow-list admin-supplied model and Vault endpoints (scheme/host) before instantiating providers. Confirmed by three independent reviewers.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 2 (commit 906442d) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 310 passed, 0 failed. Regression tests: tests/unit/test_audit_round2_fixes.py."
   },
   {
     "id": 2,
@@ -21,7 +23,9 @@
     "title": "Setup endpoints accept long-lived secrets as URL query parameters",
     "root_cause": "POST /setup/vault (vault_api_key, line 101), POST /setup/whatsapp (access_token line 130, webhook_verify_token line 133) and POST /setup/ai-model (api_key line 159) declare secrets as Query(...) parameters instead of a request body, so credentials travel in the URL.",
     "failure_scenario": "An admin configuring Vault/WhatsApp/OpenAI via the wizard sends secrets in query strings; the Vault API key, Meta access token and frontier API key are recorded verbatim in uvicorn/reverse-proxy access logs, browser history and intermediaries, and can leak via Referer. Anyone with log access obtains persistent credentials.",
-    "suggested_fix": "Move all secret fields into a JSON request body (Pydantic model); scrub access logs; rotate any keys already transmitted via query strings."
+    "suggested_fix": "Move all secret fields into a JSON request body (Pydantic model); scrub access logs; rotate any keys already transmitted via query strings.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 2 (commit 906442d) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 310 passed, 0 failed. Regression tests: tests/unit/test_audit_round2_fixes.py."
   },
   {
     "id": 3,
@@ -33,7 +37,9 @@
     "title": "Unauthenticated webchat WebSocket: guessable visitor_id is the only credential; connecting hijacks the conversation",
     "root_cause": "/ws/chat/{visitor_id} has no authentication or session binding. WebChatManager.connect (lines 59-75) closes any previously registered socket for the id and registers the new one. The bundled widget (static/webchat.html:76) generates visitor_id as 'widget-' + Math.random().toString(36).slice(2,10) (~41 bits, non-cryptographic PRNG); ids are logged at info on every connect. Nothing rate-limits connection attempts (the limiter only counts frames after connect).",
     "failure_scenario": "Attacker who learns/guesses an active visitor_id opens WS /ws/chat/<victim_id>: the victim's live socket is closed, all subsequent AI/agent replies (healthcare/legal/fintech PII for the target market) are pushed to the attacker, and the attacker can inject messages as the victim into the same persisted conversation.",
-    "suggested_fix": "Issue a signed short-lived session token via HTTP and validate it on WS connect; generate visitor ids server-side with secrets.token_urlsafe (or crypto.randomUUID client-side); never displace a live socket with an unauthenticated one; rate-limit connection attempts per IP. Merged with API-batch finding on Math.random ids."
+    "suggested_fix": "Issue a signed short-lived session token via HTTP and validate it on WS connect; generate visitor ids server-side with secrets.token_urlsafe (or crypto.randomUUID client-side); never displace a live socket with an unauthenticated one; rate-limit connection attempts per IP. Merged with API-batch finding on Math.random ids.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 3 (commit 8233dd9) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 326 passed, 0 failed. Regression tests: tests/unit/test_audit_round3_fixes.py. NOTE: Server-issued signed session tokens implemented; per-IP connection-attempt rate limiting not yet added."
   },
   {
     "id": 4,
@@ -45,7 +51,9 @@
     "title": "Raw conversation history bypasses PII Shield on frontier-routed turns",
     "root_cause": "process_detailed runs PII detection/redaction only on the current inbound content (line 225). conversation_history is passed verbatim into build_prompt_with_persona (lines 339-343). MessageProcessor._load_history (workers/message_processor.py:260-264) builds history from msg.content (raw), never the persisted content_redacted column; PromptBuilder._format_history interpolates it unchanged.",
     "failure_scenario": "Frontier enabled. Turn 1 contains a phone number -> routed LOCAL. Turn 2 has no PII and complexity >= 0.6 -> FRONTIER: the OpenAI prompt contains the raw prior turn with the phone number. Same leak on REDACTED_FRONTIER_OK turns. The core sovereignty guarantee is defeated for history even when the shield works perfectly on the current message.",
-    "suggested_fix": "When the routing target is frontier-bound, load content_redacted for history (or re-run pii_shield.analyze on each historical customer turn and substitute redacted_text). Apply the same gate consistently to the Vault query path."
+    "suggested_fix": "When the routing target is frontier-bound, load content_redacted for history (or re-run pii_shield.analyze on each historical customer turn and substitute redacted_text). Apply the same gate consistently to the Vault query path.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 3 (commit 8233dd9) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 326 passed, 0 failed. Regression tests: tests/unit/test_audit_round3_fixes.py."
   },
   {
     "id": 5,
@@ -57,7 +65,9 @@
     "title": "Multi-participant email threads collide on the global conversation unique constraint: permanent 500s and message loss",
     "root_cause": "compute_thread_id anchors every reply on References[0]/In-Reply-To (thread root), so all participants produce the same channel_conversation_id. get_or_create_conversation (conversations/manager.py:72-107) looks up scoped to customer_id but the model enforces a GLOBAL UniqueConstraint('channel','channel_conversation_id') (models/conversation.py:106-110). Different From addresses resolve to different customers, so the second participant's INSERT violates the constraint. MessageRouter.route catches IntegrityError only around add_message (message_router.py:98-113), not conversation creation.",
     "failure_scenario": "Customer A starts thread X; CC'd colleague B replies with References: X. B resolves as a different customer; customer-scoped lookup misses; INSERT hits uq_conversations_channel_conversation_id -> unhandled IntegrityError -> 500. The relay retries on 500 and fails identically forever: B's messages are never persisted or answered.",
-    "suggested_fix": "Make thread identity consistent: either look up by (channel, channel_conversation_id) without the customer filter, or change the constraint to (customer_id, channel, channel_conversation_id) and make the thread key participant-aware. Catch IntegrityError in get_or_create_conversation and re-read the winning row. Confirmed by two independent reviewers."
+    "suggested_fix": "Make thread identity consistent: either look up by (channel, channel_conversation_id) without the customer filter, or change the constraint to (customer_id, channel, channel_conversation_id) and make the thread key participant-aware. Catch IntegrityError in get_or_create_conversation and re-read the winning row. Confirmed by two independent reviewers.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 2 (commit 906442d) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 310 passed, 0 failed. Regression tests: tests/unit/test_audit_round2_fixes.py."
   },
   {
     "id": 6,
@@ -69,7 +79,9 @@
     "title": "Outbound delivery failures silently lost: no retry or delivery tracking; both callers ignore the failure result",
     "root_cause": "OutboundDispatcher's docstring claims retry logic and delivery tracking, but dispatch() makes exactly one adapter.send() attempt and converts any failure into {'success': False} with no retry, backoff, dead-letter or persisted delivery status. workers/message_processor.py:144 discards the result and acks the event (lines 147-152); agents/inbox_api.py:394-428 only logs delivery and still returns success=True to the agent.",
     "failure_scenario": "Graph API 401/429/5xx, SMTP reset, or visitor socket mid-send: dispatch returns success=False; the processor acks anyway; the inbox endpoint reports success. The customer never receives the reply, the conversation shows as answered, and nothing records or retries the failed delivery.",
-    "suggested_fix": "Implement bounded retry with backoff (or a delivery outbox), persist per-message delivery status, and make callers check result['success']: on failure dead-letter/mark undelivered and surface in the inbox instead of acking as done. Merges three reviewer findings (dispatcher, processor, inbox endpoint)."
+    "suggested_fix": "Implement bounded retry with backoff (or a delivery outbox), persist per-message delivery status, and make callers check result['success']: on failure dead-letter/mark undelivered and surface in the inbox instead of acking as done. Merges three reviewer findings (dispatcher, processor, inbox endpoint).",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 3 (commit 8233dd9) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 326 passed, 0 failed. Regression tests: tests/unit/test_audit_round3_fixes.py. NOTE: Bounded retry + caller failure checks + DLQ implemented; a persistent per-message delivery_status column (migration) remains open."
   },
   {
     "id": 7,
@@ -81,7 +93,9 @@
     "title": "Routing event published before DB commit; webhook 200 sent before commit — commit failure loses the message permanently",
     "root_cause": "route() publishes conversation.routed to Redis inside the request transaction, before any commit. get_db (db.py:82-92) commits after yield; with FastAPI >= 0.111 (requirements.txt:2) that teardown runs after the 200 response is sent. No transactional outbox links publish to commit.",
     "failure_scenario": "Webhook routes a message, publish succeeds, 200 is sent to Meta, then commit fails (connection drop, deadlock). Meta never redelivers; the inbound row rolls back; the processor finds no conversation, _wait_for_visible_conversation gives up, and the orphan event is acked. The customer message is lost with no trace beyond logs.",
-    "suggested_fix": "Use a transactional outbox (persist event row in the same transaction, publish after commit via relay), or at minimum commit before publishing and before returning the webhook response, returning non-2xx on commit failure so providers redeliver."
+    "suggested_fix": "Use a transactional outbox (persist event row in the same transaction, publish after commit via relay), or at minimum commit before publishing and before returning the webhook response, returning non-2xx on commit failure so providers redeliver.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 2 (commit 906442d) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 310 passed, 0 failed. Regression tests: tests/unit/test_audit_round2_fixes.py."
   },
   {
     "id": 8,
@@ -93,7 +107,9 @@
     "title": "No pending-entry recovery: messages read but not acked are stranded forever (at-least-once not implemented)",
     "root_cause": "subscribe() only reads new entries via XREADGROUP '>'. No XPENDING/XAUTOCLAIM/XCLAIM exists anywhere; the worker uses a fixed consumer_name 'processor-1' (message_processor.py:61) shared across replicas. Entries delivered but never XACKed stay in the PEL indefinitely. Malformed-entry 'continue' guards (lines 99-109) also leave entries pending forever.",
     "failure_scenario": "Worker reads a batch then is killed (OOM, deploy, cancellation) before acking. After restart, '>' returns only newer entries; stranded events are never reprocessed — those customers never receive an AI reply and the events never reach the DLQ.",
-    "suggested_fix": "On startup and periodically, XAUTOCLAIM idle pending entries with a min-idle-time and reprocess, with a delivery-count cap routing poison entries to the DLQ. Use unique consumer names per process (hostname+pid)."
+    "suggested_fix": "On startup and periodically, XAUTOCLAIM idle pending entries with a min-idle-time and reprocess, with a delivery-count cap routing poison entries to the DLQ. Use unique consumer names per process (hostname+pid).",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 3 (commit 8233dd9) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 326 passed, 0 failed. Regression tests: tests/unit/test_audit_round3_fixes.py."
   },
   {
     "id": 9,
@@ -105,7 +121,9 @@
     "title": "Production CMD runs 4 uvicorn workers but webchat delivery, runtime settings and SLA scanning are per-process",
     "root_cause": "CMD uses --workers 4. Each worker's lifespan starts its own MessageProcessor (main.py:119-124) consuming the same Redis group 'ai-processors' with identical consumer_name 'processor-1', so events load-balance across workers. WebChatManager.active_connections and the agent WS registry are process-local dicts with no cross-process pub/sub; WebChatAdapter.send returns success=True/delivered=False when the socket lives elsewhere (webchat.py:173-189). runtime_settings._overrides is per-process; Helm replicaCount: 2 has the same problem.",
     "failure_scenario": "Visitor's WebSocket lands on worker A; the routed event is consumed by worker B (3 of 4 chances). B persists the AI reply but push_reply finds no socket — ~75% of live webchat replies never reach the visitor. PUT /config/pii or /setup/vault updates only the handling worker; other workers keep stale PII/vault config indefinitely.",
-    "suggested_fix": "Run a single worker or split MessageProcessor/SLA scanner into a dedicated process; add a Redis pub/sub relay for webchat/agent-WS outbound delivery and a shared (Redis/DB-backed) runtime-override cache before scaling workers or replicas. Merges two reviewer findings."
+    "suggested_fix": "Run a single worker or split MessageProcessor/SLA scanner into a dedicated process; add a Redis pub/sub relay for webchat/agent-WS outbound delivery and a shared (Redis/DB-backed) runtime-override cache before scaling workers or replicas. Merges two reviewer findings.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 1 (commit 648b4c6) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 294 passed, 0 failed. Regression tests: tests/unit/test_audit_round1_fixes.py. NOTE: Scoped mitigation: single worker/replica + unique per-process consumer name. Full scale-out (Redis pub/sub delivery relay, shared override cache) remains open architectural work."
   },
   {
     "id": 10,
@@ -117,7 +135,9 @@
     "title": "Rate limiter state grows without bound: attacker-controlled visitor keys never evicted (memory-exhaustion DoS)",
     "root_cause": "_events is a defaultdict(deque) keyed by unauthenticated client-supplied visitor_id. _prune() pops expired timestamps but leaves the empty deque and dict key; allow() creates a key for every unseen visitor. reset() has zero production callers; no periodic sweep, TTL or size cap. Process-wide singleton.",
     "failure_scenario": "Attacker sequentially opens WS connections with unique ids, sends one frame each, disconnects. Entries survive forever; a few hundred thousand cheap connections retain hundreds of MB, eventually OOM-killing the single process serving all channels. The abuse-mitigation component itself becomes the DoS vector.",
-    "suggested_fix": "Delete keys whose deque becomes empty in _prune; add a periodic sweep or LRU cap; rate-limit connection attempts per IP at the webchat endpoint so key creation is throttled."
+    "suggested_fix": "Delete keys whose deque becomes empty in _prune; add a periodic sweep or LRU cap; rate-limit connection attempts per IP at the webchat endpoint so key creation is throttled.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 1 (commit 648b4c6) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 294 passed, 0 failed. Regression tests: tests/unit/test_audit_round1_fixes.py."
   },
   {
     "id": 11,
@@ -129,7 +149,9 @@
     "title": "License feature gates are never enforced anywhere in the application",
     "root_cause": "LicenseManager (initialize/validate_license/check_feature_gate) has zero callers outside src/desk/license/ (verified by grep). No route, startup hook or service instantiates it; no activation endpoint exists. Free/paid/enterprise gating is dead library code.",
     "failure_scenario": "A fresh deployment with the default 'free' license uses every paid feature: WhatsApp Business router, multi-agent inbox, persona/policy admin and GDPR compliance endpoints are mounted with only RBAC guards — none consult check_feature_gate. Paid-tier monetization is bypassed by never activating a license.",
-    "suggested_fix": "Wire LicenseManager into app startup (initialize + periodic validate_license) and add a feature-gate dependency to paid routes returning 402/403 when denied."
+    "suggested_fix": "Wire LicenseManager into app startup (initialize + periodic validate_license) and add a feature-gate dependency to paid routes returning 402/403 when denied.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 3 (commit 8233dd9) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 326 passed, 0 failed. Regression tests: tests/unit/test_audit_round3_fixes.py. NOTE: Enforcement is opt-in (LICENSE_ENFORCEMENT_ENABLED, default off) and covers persona/policy management + compliance endpoints. Multi-agent assignment and analytics gates need product tier-mapping decisions; license key validation itself is still MVP (#48)."
   },
   {
     "id": 12,
@@ -141,7 +163,9 @@
     "title": "Data retention policy is never enforced (no scheduler or endpoint invokes it)",
     "root_cause": "enforce_retention_policy has no callers anywhere in src, tests or scripts (verified by grep). main.py wires a periodic SLA scanner but nothing schedules retention; settings.data_retention_days (default 365) is decorative.",
     "failure_scenario": "A regulated operator sets DATA_RETENTION_DAYS=90 expecting GDPR storage-limitation compliance. Conversations and messages (unredacted content and PII) accumulate forever; no deletion ever runs — the advertised retention guarantee is silently violated.",
-    "suggested_fix": "Add a periodic background task (like sla_scanner_loop) or admin endpoint invoking enforce_retention_policy on a schedule; surface last-run status in the compliance report API."
+    "suggested_fix": "Add a periodic background task (like sla_scanner_loop) or admin endpoint invoking enforce_retention_policy on a schedule; surface last-run status in the compliance report API.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 1 (commit 648b4c6) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 294 passed, 0 failed. Regression tests: tests/unit/test_audit_round1_fixes.py."
   },
   {
     "id": 13,
@@ -153,7 +177,9 @@
     "title": "Unguarded runtime-config apply: key-decryption failure aborts every message permanently",
     "root_cause": "_refresh_runtime_config guards only the DB read (lines 120-129). The apply block (136-161), including FieldEncryption.decrypt of frontier_api_key_encrypted (149-151), has no try/except, and the call site (line 210) sits OUTSIDE process_detailed's try (starts line 223). decrypt raises ValueError on AES-GCM tag failure; .decode('ascii') raises UnicodeDecodeError on non-ASCII BYTEA. _applied_cfg_stamp updates only on success (161), so the failing apply retries on every message.",
     "failure_scenario": "Operator rotates SECRET_KEY after an OpenAI key was saved via the wizard. Next message: decrypt raises -> escapes process_detailed -> processor dead-letters and acks. Every message in every conversation fails indefinitely (restart does not help), silently halting all AI responses.",
-    "suggested_fix": "Wrap the apply block in try/except (log and keep current providers on failure) and/or move the call inside the pipeline try. On decryption failure disable the frontier provider and fall back to local rather than propagating."
+    "suggested_fix": "Wrap the apply block in try/except (log and keep current providers on failure) and/or move the call inside the pipeline try. On decryption failure disable the frontier provider and fall back to local rather than propagating.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 1 (commit 648b4c6) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 294 passed, 0 failed. Regression tests: tests/unit/test_audit_round1_fixes.py."
   },
   {
     "id": 14,
@@ -165,7 +191,9 @@
     "title": "desk package is not importable in the API image; container crash-loops",
     "root_cause": "Dockerfile.api installs only requirements.txt (which does not install the project), never runs pip install ., and sets no PYTHONPATH. Code is copied to /app/src/desk while WORKDIR is /app; uvicorn adds only '.' to sys.path, so desk.main cannot be found. The sibling Dockerfile sets ENV PYTHONPATH=/app/src (line 37) and CI does pip install --no-deps . — Dockerfile.api got neither fix.",
     "failure_scenario": "docker compose -f docker-compose.dev.yml up desk-api starts uvicorn, which immediately raises ModuleNotFoundError: No module named 'desk' and restarts forever; the dev stack never comes up.",
-    "suggested_fix": "Add ENV PYTHONPATH=/app/src (as in Dockerfile) or RUN pip install --no-cache-dir .; align the base image with the production Dockerfile (3.11-slim here vs 3.14-slim there)."
+    "suggested_fix": "Add ENV PYTHONPATH=/app/src (as in Dockerfile) or RUN pip install --no-cache-dir .; align the base image with the production Dockerfile (3.11-slim here vs 3.14-slim there).",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 1 (commit 648b4c6) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 294 passed, 0 failed. Regression tests: tests/unit/test_audit_round1_fixes.py."
   },
   {
     "id": 15,
@@ -177,7 +205,9 @@
     "title": "Self-asserted X-Desk-Role grants admin in every non-production environment (staging privilege escalation)",
     "root_cause": "resolve_role trusts the client-supplied X-Desk-Role header whenever environment != 'production' (default 'development'), so the role boundary for shared-key principals is a client-chosen header in dev and staging alike.",
     "failure_scenario": "On an internet-reachable staging deployment with DESK_API_KEY set, any holder of the agent-level shared key adds X-Desk-Role: admin and passes require_role('admin'), reaching GDPR hard-delete, credential setup and persona/policy management — privilege escalation with no second secret.",
-    "suggested_fix": "Trust the header only when environment == 'development' (or explicit DESK_ROLE_HEADER_TRUSTED=true); require JWT role claims for admin in staging as in production."
+    "suggested_fix": "Trust the header only when environment == 'development' (or explicit DESK_ROLE_HEADER_TRUSTED=true); require JWT role claims for admin in staging as in production.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 2 (commit 906442d) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 310 passed, 0 failed. Regression tests: tests/unit/test_audit_round2_fixes.py."
   },
   {
     "id": 16,
@@ -189,7 +219,9 @@
     "title": "Agent identity is client-asserted (agent_id query param) with no binding to the authenticated principal",
     "root_cause": "takeover (231), respond (314) and resolve (434) take agent_id as a free query parameter and only check the Agent row exists; the RBAC guard authenticates a shared key/JWT role but never maps the principal to a specific Agent row.",
     "failure_scenario": "With the shared DESK_API_KEY, agent B calls takeover?agent_id=<agentA>, then /respond and /resolve as agent A: messages persist with sender_id=agentA and audit attribution names A. inbox.html auto-picks the first agent, demonstrating identity is purely client-chosen.",
-    "suggested_fix": "Derive the acting agent from the authenticated principal (JWT sub -> Agent.user_id, or per-agent keys); reject or verify client-supplied agent_id against the principal."
+    "suggested_fix": "Derive the acting agent from the authenticated principal (JWT sub -> Agent.user_id, or per-agent keys); reject or verify client-supplied agent_id against the principal.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 7 (commit 4ef5887) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 371 passed, 0 failed. Regression tests: tests/unit/test_audit_round7_fixes.py. NOTE: JWT principals are bound to their Agent row; shared-key mode (single trusted operator credential) still accepts the supplied agent_id by design."
   },
   {
     "id": 17,
@@ -201,7 +233,9 @@
     "title": "POST /conversations/{id}/status has no ownership check and no row lock, bypassing /resolve authorization",
     "root_cause": "Unlike /resolve (ownership check at 459-468) and /takeover (with_for_update), update_conversation_status loads the conversation without a lock (513) and applies any FSM-valid transition for any agent-role caller regardless of assignment.",
     "failure_scenario": "Agent B posts {\"status\": \"resolved\"} to a conversation assigned to agent A: FSM allows active->resolved, A's conversation closes under B with no 403, and _mark_resolution clears A's assignment. A status update racing a takeover can commit a stale status (no FOR UPDATE).",
-    "suggested_fix": "Apply the same ownership/assignment verification as /resolve (or require admin for arbitrary status changes) and use with_for_update()."
+    "suggested_fix": "Apply the same ownership/assignment verification as /resolve (or require admin for arbitrary status changes) and use with_for_update().",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 7 (commit 4ef5887) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 371 passed, 0 failed. Regression tests: tests/unit/test_audit_round7_fixes.py."
   },
   {
     "id": 18,
@@ -213,7 +247,9 @@
     "title": "Compliance export/delete audit attribution is caller-controlled (actor_id query param)",
     "root_cause": "export_customer_data and delete_customer_data accept actor_id as a free-form query parameter (default 'system') and pass it straight to the audit writer (compliance/service.py:98-113 records it verbatim with actor_type='admin'); the authenticated principal is never used.",
     "failure_scenario": "Any admin-key holder (or anyone when DESK_API_KEY is unset) erases a customer with ?actor_id=<someone-else-uuid>, producing a tamper-evident audit record that falsely attributes the deletion — destroying non-repudiation of exactly the operations the audit chain exists to protect.",
-    "suggested_fix": "Derive actor_id from the authenticated principal server-side; drop the query parameter or keep it only as an untrusted informational detail. Merges two reviewer findings."
+    "suggested_fix": "Derive actor_id from the authenticated principal server-side; drop the query parameter or keep it only as an untrusted informational detail. Merges two reviewer findings.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 7 (commit 4ef5887) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 371 passed, 0 failed. Regression tests: tests/unit/test_audit_round7_fixes.py."
   },
   {
     "id": 19,
@@ -225,7 +261,9 @@
     "title": "Read receipts have no ownership check: any visitor can mark any customer's message read across channels",
     "root_cause": "mark_message_read looks up globally by Message.channel_message_id then by UUID, with no filter on the requesting visitor's conversation/customer (endpoint unauthenticated). The unique index on channel_message_id is per-conversation (models/message.py:128-134), so the global lookup is not guaranteed single-row.",
     "failure_scenario": "Any visitor sends {\"type\":\"read\",\"message_id\":\"<foreign id>\"}: Desk sets read_at on another customer's message (cross-tenant state mutation corrupting read/unread and SLA reporting); the read_ack acts as an existence oracle. A duplicated channel_message_id raises MultipleResultsFound, surfaced as a raw error string.",
-    "suggested_fix": "Scope the lookup to the requesting visitor's conversation before mutating; use .first()/limit instead of scalar_one_or_none for the non-unique global column."
+    "suggested_fix": "Scope the lookup to the requesting visitor's conversation before mutating; use .first()/limit instead of scalar_one_or_none for the non-unique global column.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 7 (commit 4ef5887) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 371 passed, 0 failed. Regression tests: tests/unit/test_audit_round7_fixes.py."
   },
   {
     "id": 20,
@@ -237,7 +275,9 @@
     "title": "Webhook signature verification fails open when app_secret is empty outside production, even with live send credentials",
     "root_cause": "verify_signature returns True (warning only) when whatsapp_app_secret is empty and environment != 'production'. environment defaults to 'development'; the fail-closed guard keys solely on the environment string, not on whether real outbound credentials are configured — send() uses them regardless.",
     "failure_scenario": "Operator sets WHATSAPP_ACCESS_TOKEN/PHONE_NUMBER_ID (real sends work) but leaves ENVIRONMENT default and never sets WHATSAPP_APP_SECRET. Anyone can POST forged webhooks: forged messages are persisted and routed, and the AI pipeline drives the real credentials to send messages to attacker-chosen numbers (abuse/cost/spam via the verified sender).",
-    "suggested_fix": "Fail closed whenever verification is impossible in a deployment with outbound credentials configured, or require an explicit opt-in dev flag rather than inferring dev mode from the environment default."
+    "suggested_fix": "Fail closed whenever verification is impossible in a deployment with outbound credentials configured, or require an explicit opt-in dev flag rather than inferring dev mode from the environment default.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 6 (commit 5577bee) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 360 passed, 0 failed. Regression tests: tests/unit/test_audit_round6_fixes.py."
   },
   {
     "id": 21,
@@ -249,7 +289,9 @@
     "title": "SMTP STARTTLS without certificate verification exposes SMTP credentials to MITM",
     "root_cause": "smtp.starttls() is called with no SSL context; smtplib's default context disables certificate verification and hostname checking. smtp.login then runs inside that unverified tunnel.",
     "failure_scenario": "An attacker on the network path presents any certificate; starttls() accepts it and Desk sends email_smtp_user/password (and customer reply content) to the attacker despite email_use_tls=True.",
-    "suggested_fix": "Pass smtp.starttls(context=ssl.create_default_context()); fail the send if the handshake cannot be verified; consider requiring TLS when credentials are configured."
+    "suggested_fix": "Pass smtp.starttls(context=ssl.create_default_context()); fail the send if the handshake cannot be verified; consider requiring TLS when credentials are configured.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 6 (commit 5577bee) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 360 passed, 0 failed. Regression tests: tests/unit/test_audit_round6_fixes.py."
   },
   {
     "id": 22,
@@ -261,7 +303,9 @@
     "title": "Email webhook HMAC verified over the extracted 'raw' string instead of the received request bytes (JSON envelope path)",
     "root_cause": "For application/json, raw = str(payload.get('raw') or payload.get('body') or '') (line 355) BEFORE verification; the HMAC (371-375) is computed over raw.encode() — the extracted field re-encoded — not await request.body(). The comment claims verification over exact received bytes, which holds only for the non-JSON branch. Relays sign the full POST body they transmit (the JSON envelope).",
     "failure_scenario": "Operator configures EMAIL_WEBHOOK_SECRET and a relay using the documented JSON envelope {\"raw\": \"<rfc822>\"}: the relay signs the full JSON body, Desk HMACs just the rfc822 string, compare_digest fails -> every legitimate signed delivery is rejected 401; inbound email is completely broken for that integration.",
-    "suggested_fix": "Read body_bytes = await request.body() once and verify the HMAC over those exact bytes for every content type before parsing; reject non-string 'raw' values instead of str()-coercing."
+    "suggested_fix": "Read body_bytes = await request.body() once and verify the HMAC over those exact bytes for every content type before parsing; reject non-string 'raw' values instead of str()-coercing.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 6 (commit 5577bee) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 360 passed, 0 failed. Regression tests: tests/unit/test_audit_round6_fixes.py."
   },
   {
     "id": 23,
@@ -273,7 +317,9 @@
     "title": "Outbound email stubs success=True in production while inbound email keeps flowing — silent reply loss",
     "root_cause": "send_reply returns {'success': True, 'stubbed': True} whenever email_enabled is False (default) or email_smtp_host is empty, with no environment guard — unlike the inbound webhook which fails closed in production. The inbound endpoint accepts mail regardless of email_enabled; callers treat success=True as delivered.",
     "failure_scenario": "Production configures EMAIL_WEBHOOK_SECRET (inbound flows, AI replies generated and persisted) but leaves email_enabled=False or forgets EMAIL_SMTP_HOST. Every reply is 'delivered' as a stub; the customer never receives an answer and the only signal is a warning log.",
-    "suggested_fix": "In production (or whenever inbound email is accepted) return success=False with a clear 'SMTP not configured' error, or gate the inbound webhook on the same configuration; record stubbed/failed delivery status on the message."
+    "suggested_fix": "In production (or whenever inbound email is accepted) return success=False with a clear 'SMTP not configured' error, or gate the inbound webhook on the same configuration; record stubbed/failed delivery status on the message.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 6 (commit 5577bee) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 360 passed, 0 failed. Regression tests: tests/unit/test_audit_round6_fixes.py."
   },
   {
     "id": 24,
@@ -285,7 +331,9 @@
     "title": "SMTP connection opened with no socket timeout; hung sends exhaust the shared to_thread executor",
     "root_cause": "_open_smtp calls smtplib.SMTP(host, port) without timeout (default None = block forever). send offloads via asyncio.to_thread (line 317), using the loop's default ThreadPoolExecutor (min(32, cpu+4)) shared with every other to_thread caller.",
     "failure_scenario": "SMTP host accepts TCP but never sends the 220 greeting: each send occupies a worker thread forever. After ~32 stuck sends the executor saturates; all email sends and any other to_thread work queue indefinitely behind dead threads, halting outbound delivery with no error surfaced.",
-    "suggested_fix": "Open with an explicit timeout (10-30s) so every blocking phase fails fast; optionally use a dedicated bounded executor for SMTP."
+    "suggested_fix": "Open with an explicit timeout (10-30s) so every blocking phase fails fast; optionally use a dedicated bounded executor for SMTP.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 6 (commit 5577bee) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 360 passed, 0 failed. Regression tests: tests/unit/test_audit_round6_fixes.py."
   },
   {
     "id": 25,
@@ -309,7 +357,9 @@
     "title": "Webchat error frames leak internal exception text to anonymous visitors",
     "root_cause": "The routing failure handler sends {\"type\": \"error\", \"message\": str(exc)} straight to the unauthenticated visitor socket; exceptions can carry SQL fragments, table/column names, connection strings or stack-derived detail. webchat.html renders these frames.",
     "failure_scenario": "A visitor frame triggers a DB error (constraint violation, MultipleResultsFound from the read-receipt path); the raw asyncpg/SQLAlchemy error string is delivered to the anonymous client, disclosing schema useful for further attacks.",
-    "suggested_fix": "Log the full exception server-side; send a generic error code/message to the client (as the rate-limit path already does). Merges two reviewer findings."
+    "suggested_fix": "Log the full exception server-side; send a generic error code/message to the client (as the rate-limit path already does). Merges two reviewer findings.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 7 (commit 4ef5887) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 371 passed, 0 failed. Regression tests: tests/unit/test_audit_round7_fixes.py."
   },
   {
     "id": 27,
@@ -333,7 +383,9 @@
     "title": "AI feedback silently not persisted: in-place JSONB mutation with same-object reassignment",
     "root_cause": "metadata = message.metadata_ or {} mutates the existing dict in place when non-empty, then reassigns the identical object. Message.metadata_ is plain JSONB (no MutableDict/flag_modified anywhere); SQLAlchemy scalar attribute history sees old == new and emits no UPDATE.",
     "failure_scenario": "POST /messages/{id}/feedback on an AI message whose metadata already contains confidence (the normal case) returns success=true but agent_feedback is never written; feedback analytics are silently empty. Works only when metadata_ is exactly {}.",
-    "suggested_fix": "Assign a new dict: message.metadata_ = {**(message.metadata_ or {}), \"agent_feedback\": feedback}, or use flag_modified / MutableDict.as_mutable(JSONB)."
+    "suggested_fix": "Assign a new dict: message.metadata_ = {**(message.metadata_ or {}), \"agent_feedback\": feedback}, or use flag_modified / MutableDict.as_mutable(JSONB).",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 4 (commit c407144) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 335 passed, 0 failed. Regression tests: tests/unit/test_audit_round4_fixes.py."
   },
   {
     "id": 29,
@@ -345,7 +397,9 @@
     "title": "Status-change reason silently dropped on conversations with existing metadata (same JSONB pattern)",
     "root_cause": "update_status does metadata = conversation.metadata_ or {}; metadata[\"last_status_change_reason\"] = reason; conversation.metadata_ = metadata — the same in-place-mutation/same-object-reassignment pattern plain JSONB change detection ignores. Exercised by inbox /status, /takeover and /resolve.",
     "failure_scenario": "First status change on a fresh conversation persists the reason; every subsequent change on a conversation with non-empty metadata (prior reason, CSAT, SLA data) returns success but never updates last_status_change_reason, so inbox/audit shows stale reasons.",
-    "suggested_fix": "conversation.metadata_ = {**(conversation.metadata_ or {}), \"last_status_change_reason\": reason} or flag_modified. Merges two reviewer findings; fix together with #28 (same pattern)."
+    "suggested_fix": "conversation.metadata_ = {**(conversation.metadata_ or {}), \"last_status_change_reason\": reason} or flag_modified. Merges two reviewer findings; fix together with #28 (same pattern).",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 4 (commit c407144) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 335 passed, 0 failed. Regression tests: tests/unit/test_audit_round4_fixes.py."
   },
   {
     "id": 30,
@@ -357,7 +411,9 @@
     "title": "Activating a nonexistent persona deactivates ALL personas and returns success",
     "root_cause": "activate_persona first sets is_active=False on every persona, then only commits inside 'if persona:'. For an unknown UUID it skips its own commit, but get_db auto-commits on clean teardown (db.py:87), persisting the mass deactivation; the API (persona_policy_api.py:175-183) returns 200 success.",
     "failure_scenario": "POST /admin/personas/{typo-or-stale-uuid}/activate returns success while leaving zero active personas; all subsequent AI replies silently lose the brand voice (get_active_persona returns None). No 404 is ever produced.",
-    "suggested_fix": "Look up the persona first and raise 404 before touching other rows; deactivate-all + activate in one transaction only after the target exists; guard concurrent activations (lock or partial unique index). Merges two reviewer findings."
+    "suggested_fix": "Look up the persona first and raise 404 before touching other rows; deactivate-all + activate in one transaction only after the target exists; guard concurrent activations (lock or partial unique index). Merges two reviewer findings.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 4 (commit c407144) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 335 passed, 0 failed. Regression tests: tests/unit/test_audit_round4_fixes.py."
   },
   {
     "id": 31,
@@ -381,7 +437,9 @@
     "title": "Unvalidated trigger_config: one malformed policy breaks the AI pipeline for every message",
     "root_cause": "PolicyCreateRequest.trigger_config is an arbitrary dict with no shape validation; _evaluate_trigger assumes keywords/patterns/topics are iterables of strings and patterns are valid regexes (re.search unguarded, 243-247). create_policy validates trigger_type/action/applies_to but never compiles patterns. The pre-generation hook runs for every inbound message (ai/engine.py:266) inside the pipeline-wide try whose except returns the canned fallback_reply.",
     "failure_scenario": "Admin posts {\"keywords\": 5} -> TypeError on every message; {\"patterns\": [\"(\"]} -> re.error on every message; ALL customers receive the canned fallback and guardrails never run. A catastrophic-backtracking pattern ReDoS-blocks the single processor worker (synchronous re.search).",
-    "suggested_fix": "Validate trigger_config at creation (list[str] shapes; re.compile each pattern, reject invalid with 400); defensively skip/log malformed entries per policy instead of raising; consider a match timeout/RE2 for admin regexes. Merges two reviewer findings."
+    "suggested_fix": "Validate trigger_config at creation (list[str] shapes; re.compile each pattern, reject invalid with 400); defensively skip/log malformed entries per policy instead of raising; consider a match timeout/RE2 for admin regexes. Merges two reviewer findings.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 5 (commit 21ac215) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 351 passed, 0 failed. Regression tests: tests/unit/test_audit_round5_fixes.py."
   },
   {
     "id": 33,
@@ -393,7 +451,9 @@
     "title": "Metadata conditions bypassed by keyword matches and never receive metadata in production",
     "root_cause": "_evaluate_trigger returns True on a keyword/pattern/topic match before metadata conditions are consulted (OR semantics), and evaluates metadata only when nothing else matched. The production caller ai/engine.py:266 invokes run_pre_generation_hooks(content) with no metadata argument at all.",
     "failure_scenario": "Policy {keywords:['refund'], metadata:{channel:'whatsapp'}, action:'block'} intended WhatsApp-only blocks refund messages on webchat/email too. A metadata-only policy can never fire in the live pipeline because metadata is always None — the guardrail is silently inert.",
-    "suggested_fix": "Evaluate metadata conditions as a mandatory AND-gate whenever present; pass conversation metadata (channel, customer segment) from the AI engine into both hook phases."
+    "suggested_fix": "Evaluate metadata conditions as a mandatory AND-gate whenever present; pass conversation metadata (channel, customer segment) from the AI engine into both hook phases.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 5 (commit 21ac215) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 351 passed, 0 failed. Regression tests: tests/unit/test_audit_round5_fixes.py."
   },
   {
     "id": 34,
@@ -405,7 +465,9 @@
     "title": "Topic keyword matching uses raw substrings, producing false-positive blocks",
     "root_cause": "TOPIC_KEYWORDS entries like 'vs' (competitor) and 'law' (legal) are matched with plain 'keyword in content_lower' — no word boundaries — in both the topic loop (253-254) and generic keyword check (240).",
     "failure_scenario": "'I love my new TVs' or 'there is a flaw in my order': 'vs' matches inside 'TVs', 'law' inside 'flaw', firing competitor/legal topic policies. With action=block/escalate, innocent messages are blocked or force-escalated, breaking support and inflating agent load.",
-    "suggested_fix": "Match with word boundaries (re.search(r'\\b'+re.escape(kw)+r'\\b', ...)) or tokenize; apply the same rule to trigger_config keywords."
+    "suggested_fix": "Match with word boundaries (re.search(r'\\b'+re.escape(kw)+r'\\b', ...)) or tokenize; apply the same rule to trigger_config keywords.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 5 (commit 21ac215) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 351 passed, 0 failed. Regression tests: tests/unit/test_audit_round5_fixes.py."
   },
   {
     "id": 35,
@@ -417,7 +479,9 @@
     "title": "Persisted runtime overrides never loaded at startup (load_all has zero callers)",
     "root_cause": "The module documents a DB-backed durable override cache 'refreshed from the DB at startup', but load_all() is never invoked anywhere (grep-verified; main.py lifespan does not call it). _overrides starts empty in every process; readers (vault_client.py:303, pii_shield.py:153) only consult the process-local cache. The setup-persistence test (tests/unit/test_review_round6_fixes.py:232-254) asserts only the in-process cache, so the suite stays green while half the feature is missing.",
     "failure_scenario": "Admin configures Vault via /setup/vault (persisted, works). After any restart/deploy the cache is empty, get_vault_client() falls back to env defaults (dev key vk_dev_local_key), and knowledge retrieval silently breaks until the admin re-saves. Same for PUT /config/pii.",
-    "suggested_fix": "Call load_all(session) during lifespan startup (and after multi-worker writes, or use a DB/Redis read-through cache); add a restart-simulation test. Merges the infra-batch High test finding into this root-cause bug."
+    "suggested_fix": "Call load_all(session) during lifespan startup (and after multi-worker writes, or use a DB/Redis read-through cache); add a restart-simulation test. Merges the infra-batch High test finding into this root-cause bug.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 4 (commit c407144) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 335 passed, 0 failed. Regression tests: tests/unit/test_audit_round4_fixes.py."
   },
   {
     "id": 36,
@@ -429,7 +493,9 @@
     "title": "POST /setup/whatsapp persists config that no component ever reads",
     "root_cause": "The endpoint writes a 'whatsapp' system_settings row and says 'applies on service restart', but WhatsAppBusinessAdapter reads only get_settings() env values (whatsapp_business.py:77-78, 174, 258, 466); no code calls get_override(\"whatsapp\"), and load_all never runs anyway (#35).",
     "failure_scenario": "Operator completes the WhatsApp wizard with a valid token, restarts as instructed, and outbound delivery still fails (adapter sees empty env token). The wizard's core promise is a silent no-op.",
-    "suggested_fix": "Make the adapter and webhook verify-token check consume get_override(\"whatsapp\") with env fallback, and load overrides at startup; or remove the persistence claim."
+    "suggested_fix": "Make the adapter and webhook verify-token check consume get_override(\"whatsapp\") with env fallback, and load overrides at startup; or remove the persistence claim.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 4 (commit c407144) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 335 passed, 0 failed. Regression tests: tests/unit/test_audit_round4_fixes.py."
   },
   {
     "id": 37,
@@ -501,7 +567,9 @@
     "title": "Event acked even when dead-lettering fails",
     "root_cause": "In the failure path, dead_letter() is wrapped in try/except that only logs, and acknowledge() then runs unconditionally. If the DLQ write fails but the ack succeeds, the failed event is removed from the PEL without being preserved anywhere.",
     "failure_scenario": "Redis hits maxmemory (XADD to conversation.routed:dlq rejected) while XACK succeeds: the poison/failed event exists neither in the pending list nor the DLQ — cannot be inspected or replayed, contradicting the comment's stated intent.",
-    "suggested_fix": "Acknowledge only after a successful dead_letter write; on DLQ failure leave the entry pending for later claim/recovery and surface the failure."
+    "suggested_fix": "Acknowledge only after a successful dead_letter write; on DLQ failure leave the entry pending for later claim/recovery and surface the failure.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 8 (commit cefbd14) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 380 passed, 0 failed. Regression tests: tests/unit/test_audit_round8_fixes.py."
   },
   {
     "id": 43,
@@ -513,7 +581,9 @@
     "title": "Commit-visibility wait gives up after ~2s and silently drops the reply while still acking",
     "root_cause": "_wait_for_visible_conversation polls ~2s then logs a warning and continues. When the routing transaction commits later (slow DB, lock contention), the full LLM pipeline runs, _persist_and_build_outbound returns None because the conversation is still invisible — no outbound dispatched, yet the event is acked (147-152).",
     "failure_scenario": "Routing transaction takes 3s to commit under load: processor waits 2s, pays inference cost, finds no conversation at persist time, returns None and acks. The customer's message is persisted but never answered; the event is gone — no DLQ, no retry.",
-    "suggested_fix": "Treat prolonged invisibility as retryable: do not ack (leave pending for claim-based redelivery, see #8) or requeue with a delivery counter; skip LLM inference until the conversation is visible."
+    "suggested_fix": "Treat prolonged invisibility as retryable: do not ack (leave pending for claim-based redelivery, see #8) or requeue with a delivery counter; skip LLM inference until the conversation is visible.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 8 (commit cefbd14) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 380 passed, 0 failed. Regression tests: tests/unit/test_audit_round8_fixes.py."
   },
   {
     "id": 44,
@@ -525,7 +595,9 @@
     "title": "Engine cache keyed by id(loop): loop-id reuse returns engines bound to dead loops; dead-loop engines leak",
     "root_cause": "_engines is keyed by id(loop). CPython can reuse a GC'd loop's memory address for a new loop, so get_engine() can return an engine whose asyncpg pool holds connections attached to the closed loop. Engines for short-lived loops are never disposed (only the current loop's at shutdown).",
     "failure_scenario": "Code running multiple loops sequentially (asyncio.run per task, test suites): loop L1's engine is cached under id(L1); L1 is freed; L2 allocated at the same address gets the stale engine -> 'got Future attached to a different loop' / InterfaceError. Each abandoned loop also leaks up to pool_size+overflow connections.",
-    "suggested_fix": "Key by the loop object with weakref.WeakKeyDictionary (or store the engine on the loop) and dispose engines when their loop closes."
+    "suggested_fix": "Key by the loop object with weakref.WeakKeyDictionary (or store the engine on the loop) and dispose engines when their loop closes.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 8 (commit cefbd14) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 380 passed, 0 failed. Regression tests: tests/unit/test_audit_round8_fixes.py. NOTE: WeakKeyDictionary prevents dead-loop engine reuse; engines of abandoned loops are GC'd rather than explicitly disposed."
   },
   {
     "id": 45,
@@ -537,7 +609,9 @@
     "title": "Streams grow without bound: XADD has no MAXLEN and nothing ever trims",
     "root_cause": "publish() calls xadd without maxlen; dead_letter() likewise; no XTRIM/retention job anywhere. conversation.routed (one entry per inbound message, full content) and every :dlq stream accumulate forever.",
     "failure_scenario": "Thousands of messages/day grow Redis memory linearly until maxmemory eviction or OOM. Once Redis rejects writes, every webhook publish fails (500s + provider redelivery storms) and the processor cannot ack — full pipeline outage caused solely by retention absence.",
-    "suggested_fix": "XADD with MAXLEN ~ sized to throughput, or periodic XTRIM keyed on time/length; apply retention to DLQ streams too."
+    "suggested_fix": "XADD with MAXLEN ~ sized to throughput, or periodic XTRIM keyed on time/length; apply retention to DLQ streams too.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 8 (commit cefbd14) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 380 passed, 0 failed. Regression tests: tests/unit/test_audit_round8_fixes.py."
   },
   {
     "id": 46,
@@ -549,7 +623,9 @@
     "title": "SLA scanner runs in every worker: duplicated full-table scans, racing escalations, unbounded eager load",
     "root_cause": "sla_scanner_loop starts in each API worker's lifespan (4 per Dockerfile). Each scan loads ALL active conversations with selectinload(messages) (sla/checker.py:44-49) — full message content hydrated though evaluate() needs only sender_type/created_at of the earliest ai/agent message. SLAService.escalate's check-then-set has no row lock.",
     "failure_scenario": "Workers A and B both read an overdue conversation as ACTIVE and both escalate: duplicate sla.breach events/notifications, doubled metrics, 4x DB load every 60s. At scale the eager load of every active conversation's entire history can exhaust memory.",
-    "suggested_fix": "Run the scanner as a single dedicated task (or Redis distributed lock / FOR UPDATE SKIP LOCKED); replace the eager load with a MIN(created_at) aggregate per conversation; paginate and commit in batches. Merges two reviewer findings."
+    "suggested_fix": "Run the scanner as a single dedicated task (or Redis distributed lock / FOR UPDATE SKIP LOCKED); replace the eager load with a MIN(created_at) aggregate per conversation; paginate and commit in batches. Merges two reviewer findings.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 8 (commit cefbd14) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 380 passed, 0 failed. Regression tests: tests/unit/test_audit_round8_fixes.py. NOTE: Distributed lock + column-only eager load implemented; scan pagination remains open for very large deployments."
   },
   {
     "id": 47,
@@ -1029,7 +1105,9 @@
     "title": "append_disclaimer policies evaluated twice and mark the response invalid",
     "root_cause": "The violations loop (170-184) records every triggered policy including append_disclaimer (severity defaults 'warning'), so is_valid becomes False for a disclaimer-only match; a second loop (195-203) re-evaluates the same triggers to collect append_texts.",
     "failure_scenario": "A post policy with action=append_disclaimer triggers: result reports is_valid=False even though action='allow'. Any caller relying on is_valid (e.g. /policies/test consumers) treats a perfectly allowed reply as a violation; trigger evaluation cost is doubled.",
-    "suggested_fix": "Exclude append_disclaimer from the violations list (or compute is_valid from blocking violations only) and collect append_texts in the single evaluation pass."
+    "suggested_fix": "Exclude append_disclaimer from the violations list (or compute is_valid from blocking violations only) and collect append_texts in the single evaluation pass.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 5 (commit 21ac215) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 351 passed, 0 failed. Regression tests: tests/unit/test_audit_round5_fixes.py."
   },
   {
     "id": 87,
@@ -1041,7 +1119,9 @@
     "title": "Deployment scoping inconsistent: policies created deployment-stamped but evaluated/listed/toggled unscoped; two uuid5 namespaces",
     "root_cause": "get_active_policies applies the deployment_id filter only when the constructor received one, and every production caller (ai/engine.py:265,374; persona_policy_api.py) constructs PolicyEngine(db) without it. create_policy stamps default_deployment_id() (uuid5 NAMESPACE_URL) while admin/api.py's _deployment_uuid uses uuid5(NAMESPACE_DNS) — two different UUIDs for the same deployment. list_policies/set_policy_active never filter by deployment.",
     "failure_scenario": "In a shared-DB multi-deployment setup (the schema supports it via deployment_id columns), deployment A's inference evaluates B's active policies and an admin of A can list/deactivate B's policies by id. The divergent uuid5 namespaces make any future join between ai_configurations and response_policies on deployment_id silently return nothing.",
-    "suggested_fix": "Default PolicyEngine to the current deployment id in all callers; scope list/toggle to it; unify deployment-id derivation into one shared helper."
+    "suggested_fix": "Default PolicyEngine to the current deployment id in all callers; scope list/toggle to it; unify deployment-id derivation into one shared helper.",
+    "status": "fixed",
+    "verification_notes": "Fixed in batch 5 (commit 21ac215) on branch fix/ocr-full-audit-round1. Verification: venv/bin/python -m ruff check src/desk/ -> exit 0; venv/bin/python -m mypy src/desk/ --ignore-missing-imports --python-version 3.14 -> Success, 0 errors; PYTHONPATH=src venv/bin/python -m pytest tests/ -m 'not e2e' -> 351 passed, 0 failed. Regression tests: tests/unit/test_audit_round5_fixes.py."
   },
   {
     "id": 88,
